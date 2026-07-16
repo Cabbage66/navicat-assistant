@@ -12,26 +12,22 @@ public sealed record DisplayStyle
 public sealed record AppSettings
 {
     public int SettingsVersion { get; set; }
+    public bool AssistantEnabled { get; set; } = true;
     public bool AiEnabled { get; set; } = true;
     public string ApiBaseUrl { get; set; } = "https://api.deepseek.com";
     public string Model { get; set; } = "deepseek-v4-flash";
     public string CustomGlobalPrompt { get; set; } = string.Empty;
     public int PredictionDebounceMilliseconds { get; set; } = 850;
     public int PredictionMinimumIntervalMilliseconds { get; set; } = 1400;
-    public bool OverlayEnabled { get; set; } = true;
-    public bool TaskbarPanelEnabled { get; set; }
+    public bool TaskbarPanelEnabled { get; set; } = true;
+    public double TaskbarWidth { get; set; } = 640;
     public bool MobileServerEnabled { get; set; }
     public bool KeyboardFallbackEnabled { get; set; }
     public int MobilePort { get; set; } = 17832;
     public string MobileAccessToken { get; set; } = string.Empty;
-    public string ToggleOverlayHotkey { get; set; } = "Ctrl+Alt+1";
-    public string ToggleTaskbarHotkey { get; set; } = "Ctrl+Alt+2";
-    public string ToggleMobileHotkey { get; set; } = "Ctrl+Alt+3";
+    public string ToggleAssistantHotkey { get; set; } = "Ctrl+Alt+S";
     public string CycleCandidatesHotkey { get; set; } = "Ctrl+Alt+R";
     public string AnalyzeSelectionHotkey { get; set; } = "Ctrl+Alt+E";
-    public double? OverlayLeft { get; set; }
-    public double? OverlayTop { get; set; }
-    public DisplayStyle OverlayStyle { get; set; } = new();
     public DisplayStyle TaskbarStyle { get; set; } = new()
     {
         FontSize = 11,

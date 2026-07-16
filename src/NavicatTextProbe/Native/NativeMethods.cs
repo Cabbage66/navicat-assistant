@@ -5,6 +5,17 @@ namespace NavicatTextProbe.Native;
 
 internal static class NativeMethods
 {
+    internal const int GwlExStyle = -20;
+    internal const long WsExToolWindow = 0x00000080L;
+    internal const long WsExAppWindow = 0x00040000L;
+    internal const long WsExNoActivate = 0x08000000L;
+    internal const int WmMouseActivate = 0x0021;
+    internal const int MaNoActivate = 3;
+    internal static readonly nint HwndTopmost = new(-1);
+    internal const uint SwpNoSize = 0x0001;
+    internal const uint SwpNoMove = 0x0002;
+    internal const uint SwpNoActivate = 0x0010;
+    internal const uint SwpShowWindow = 0x0040;
     internal const int WhKeyboardLl = 13;
     internal const int WmKeyDown = 0x0100;
     internal const int WmSysKeyDown = 0x0104;
@@ -27,6 +38,23 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern uint GetDpiForWindow(nint windowHandle);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    internal static extern nint GetWindowLongPtr(nint windowHandle, int index);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    internal static extern nint SetWindowLongPtr(nint windowHandle, int index, nint newValue);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetWindowPos(
+        nint windowHandle,
+        nint insertAfter,
+        int x,
+        int y,
+        int width,
+        int height,
+        uint flags);
 
     [DllImport("user32.dll")]
     internal static extern uint GetWindowThreadProcessId(nint windowHandle, out uint processId);

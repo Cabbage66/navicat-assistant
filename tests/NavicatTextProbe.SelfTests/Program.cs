@@ -1,6 +1,9 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Interop;
+using NavicatTextProbe;
+using NavicatTextProbe.Native;
 using NavicatTextProbe.Models;
 using NavicatTextProbe.Services;
 
@@ -46,6 +49,11 @@ Check("unfinished block comment is retained", PromptTemplates.BuildCompletionPro
 var diagnosisPrompt = PromptTemplates.BuildDiagnosisPrompt("SELECT", "SELECT");
 Check("diagnosis asks for every issue", diagnosisPrompt.Contains("所有能够确认", StringComparison.Ordinal));
 Check("diagnosis requests priority order", diagnosisPrompt.Contains("P0 → P1 → P2", StringComparison.Ordinal));
+var longDiagnosisDocument = "DIAGNOSIS_DOCUMENT_START\n" + new string('d', 150_000) + "\nDIAGNOSIS_DOCUMENT_END";
+var longDiagnosisPrompt = PromptTemplates.BuildDiagnosisPrompt("SELECT 1;", longDiagnosisDocument);
+Check("diagnosis also receives a formerly truncated document in full",
+    longDiagnosisPrompt.Contains("DIAGNOSIS_DOCUMENT_START", StringComparison.Ordinal) &&
+    longDiagnosisPrompt.Contains("DIAGNOSIS_DOCUMENT_END", StringComparison.Ordinal));
 
 var foreignKeyDocument = """
     CREATE TABLE yangzhuoran_exam_addresses(
@@ -98,6 +106,87 @@ var candidatePrompt = PromptTemplates.BuildCandidateContinuationPrompt(foreignKe
 Check("candidate prompt requests exactly three choices", candidatePrompt.Contains("恰好 3", StringComparison.Ordinal));
 Check("candidate prompt carries inferred foreign-key state", candidatePrompt.Contains("ForeignKeyConstraint", StringComparison.Ordinal));
 Check("candidate prompt forbids repeating is_default", candidatePrompt.Contains("is_default", StringComparison.Ordinal));
+
+var formerlyTruncatedDocument = "FULL_DOCUMENT_START\n" + new string('x', 150_000) + "\nFULL_DOCUMENT_END";
+var formerlyTruncatedPrompt = PromptTemplates.BuildCompletionPrompt(new ProbeResult
+{
+    Text = formerlyTruncatedDocument,
+    CaretOffset = formerlyTruncatedDocument.Length / 2
+});
+Check("documents below the DeepSeek-safe limit are sent in full",
+    formerlyTruncatedPrompt.Contains("FULL_DOCUMENT_START", StringComparison.Ordinal) &&
+    formerlyTruncatedPrompt.Contains("FULL_DOCUMENT_END", StringComparison.Ordinal) &&
+    !formerlyTruncatedPrompt.Contains("模型安全上下文而省略", StringComparison.Ordinal));
+
+var oversizedDocument = "OVERSIZED_START\n" +
+                        new string('l', 499_980) +
+                        "\nCARET_ZONE\n" +
+                        new string('r', 499_980) +
+                        "\nOVERSIZED_END";
+var oversizedCaret = oversizedDocument.IndexOf("CARET_ZONE", StringComparison.Ordinal) + "CARET_ZONE".Length;
+var oversizedPrompt = PromptTemplates.BuildCompletionPrompt(new ProbeResult
+{
+    Text = oversizedDocument,
+    CaretOffset = oversizedCaret
+});
+Check("oversized completion context keeps the exact cursor", oversizedPrompt.Contains("CARET_ZONE<CURSOR>", StringComparison.Ordinal));
+Check("oversized completion context is cropped on both sides",
+    !oversizedPrompt.Contains("OVERSIZED_START", StringComparison.Ordinal) &&
+    !oversizedPrompt.Contains("OVERSIZED_END", StringComparison.Ordinal) &&
+    oversizedPrompt.Contains("/* 前方", StringComparison.Ordinal) &&
+    oversizedPrompt.Contains("/* 后方", StringComparison.Ordinal));
+Check("completion context uses the 800k-character DeepSeek-safe budget",
+    PromptTemplates.CompletionDocumentCharacterLimit == 800_000 && oversizedPrompt.Length < 805_000);
+
+var settingsTestRoot = Path.Combine(Path.GetTempPath(), "Assistant-Settings-SelfTests", Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(Path.Combine(settingsTestRoot, "config"));
+File.WriteAllText(Path.Combine(settingsTestRoot, "config", "settings.json"), """
+    {
+      "SettingsVersion": 2,
+      "OverlayEnabled": true,
+      "TaskbarPanelEnabled": false,
+      "TaskbarWidth": 9999,
+      "MobileAccessToken": "self-test-access-token-12345"
+    }
+    """);
+try
+{
+    var migratedSettings = new SettingsService(settingsTestRoot);
+    Check("legacy overlay users migrate to the taskbar channel", migratedSettings.Current.TaskbarPanelEnabled);
+    Check("taskbar width is clamped to the supported range", migratedSettings.Current.TaskbarWidth == 1400);
+    Check("global assistant hotkey defaults to Ctrl+Alt+S", migratedSettings.Current.ToggleAssistantHotkey == "Ctrl+Alt+S");
+    Check("removed overlay settings are not written back",
+        !File.ReadAllText(migratedSettings.SettingsPath).Contains("OverlayEnabled", StringComparison.Ordinal));
+}
+finally
+{
+    Directory.Delete(settingsTestRoot, recursive: true);
+}
+
+long taskbarExtendedStyle = 0;
+Exception? taskbarStyleError = null;
+var taskbarStyleThread = new Thread(() =>
+{
+    try
+    {
+        var taskbarWindow = new TaskbarSuggestionWindow();
+        var handle = new WindowInteropHelper(taskbarWindow).EnsureHandle();
+        taskbarExtendedStyle = NativeMethods.GetWindowLongPtr(handle, NativeMethods.GwlExStyle).ToInt64();
+        taskbarWindow.Close();
+    }
+    catch (Exception ex)
+    {
+        taskbarStyleError = ex;
+    }
+});
+taskbarStyleThread.SetApartmentState(ApartmentState.STA);
+taskbarStyleThread.Start();
+taskbarStyleThread.Join();
+Check("taskbar tool-window style can be created without showing UI", taskbarStyleError is null);
+Check("taskbar suggestion is excluded from app switching",
+    (taskbarExtendedStyle & NativeMethods.WsExToolWindow) != 0 &&
+    (taskbarExtendedStyle & NativeMethods.WsExNoActivate) != 0 &&
+    (taskbarExtendedStyle & NativeMethods.WsExAppWindow) == 0);
 
 var longUnicodeText = new string('a', 4095) + "😀" + new string('中', 5000);
 var expectedHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(longUnicodeText)));

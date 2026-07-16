@@ -48,7 +48,7 @@ internal sealed class ProbeLogger : IDisposable
 
     public void WriteSessionStarted() => Write("session_started", new
     {
-        app = "NavicatTextProbe",
+        app = "Assistant",
         version = typeof(ProbeLogger).Assembly.GetName().Version?.ToString(),
         operatingSystem = Environment.OSVersion.ToString(),
         processArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(),
@@ -108,13 +108,14 @@ internal sealed class ProbeLogger : IDisposable
 
     public void WriteConfiguration(AppSettings settings) => Write("configuration", new
     {
+        settings.AssistantEnabled,
         settings.AiEnabled,
         settings.ApiBaseUrl,
         settings.Model,
         settings.PredictionDebounceMilliseconds,
         settings.PredictionMinimumIntervalMilliseconds,
-        settings.OverlayEnabled,
         settings.TaskbarPanelEnabled,
+        settings.TaskbarWidth,
         settings.MobileServerEnabled,
         settings.KeyboardFallbackEnabled,
         note = "API Key、手机访问令牌和自定义全局提示词不会写入探测日志。"

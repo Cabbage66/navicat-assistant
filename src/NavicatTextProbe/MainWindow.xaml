@@ -1,7 +1,7 @@
 <Window x:Class="NavicatTextProbe.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Navicat SQL Copilot"
+        Title="Assistant"
         Width="1060" Height="820" MinWidth="820" MinHeight="620"
         WindowStartupLocation="CenterScreen" Background="#F3F6F8">
     <Grid Margin="18">
@@ -16,15 +16,15 @@
         <Grid>
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <StackPanel>
-                <TextBlock FontSize="25" FontWeight="SemiBold" Foreground="#17202A" Text="Navicat SQL Copilot" />
+                <TextBlock FontSize="25" FontWeight="SemiBold" Foreground="#17202A" Text="Assistant" />
                 <TextBlock Margin="0,5,0,0" Foreground="#5D6D7E"
-                           Text="读取全文和光标语法状态并预测下一行；Ctrl+Alt+R 生成/切换 3 个候选，Ctrl+Alt+E 诊断选中 SQL。" />
+                           Text="读取全文和光标语法状态并预测下一行；Ctrl+Alt+S 整体启停，Ctrl+Alt+R 切换候选，Ctrl+Alt+E 诊断。" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
                 <Button MinWidth="106" Height="34" Padding="14,0" Click="AnalyzeButton_OnClick" Content="分析剪贴板" />
                 <Button Margin="9,0,0,0" MinWidth="88" Height="34" Padding="14,0" Click="SettingsButton_OnClick" Content="设置" />
                 <Button x:Name="ToggleButton" Margin="9,0,0,0" MinWidth="96" Height="34" Padding="14,0"
-                        Click="ToggleButton_OnClick" Content="暂停探测" />
+                        Click="ToggleButton_OnClick" Content="隐藏 Assistant" />
                 <Button Margin="9,0,0,0" MinWidth="96" Height="34" Padding="14,0"
                         Click="OpenLogsButton_OnClick" Content="日志目录" />
             </StackPanel>
@@ -60,7 +60,7 @@
             <Border Grid.Column="2" Padding="13" CornerRadius="9" Background="White" BorderBrush="#D5D8DC" BorderThickness="1">
                 <StackPanel>
                     <TextBlock FontWeight="SemiBold" Foreground="#273746" Text="输出通道" />
-                    <TextBlock x:Name="OverlayStatusText" Margin="0,8,0,0" Foreground="#52616F" Text="悬浮窗：—" />
+                    <TextBlock x:Name="AssistantStatusText" Margin="0,8,0,0" Foreground="#52616F" Text="Assistant：—" />
                     <TextBlock x:Name="TaskbarStatusText" Margin="0,5,0,0" Foreground="#52616F" Text="任务栏内建议：—" />
                     <TextBlock x:Name="MobileStatusText" Margin="0,5,0,0" Foreground="#52616F" TextWrapping="Wrap" Text="手机页面：—" />
                     <WrapPanel Margin="0,8,0,0">
@@ -108,7 +108,7 @@
         <Grid Grid.Row="4" Margin="0,9,0,0">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <TextBlock Foreground="#7B241C" TextWrapping="Wrap"
-                       Text="探测日志包含 SQL 全文；AI 开启时，光标附近的 SQL 上下文会发送给所配置的 DeepSeek API。请勿输入密钥或禁止外发的数据。" />
+                       Text="探测日志包含 SQL 全文；AI 开启时会整篇优先发送 SQL，超长文档才按光标附近裁剪。请勿输入密钥或禁止外发的数据。" />
             <TextBlock x:Name="LogPathText" Grid.Column="1" Margin="20,0,0,0" Foreground="#667788" VerticalAlignment="Center" />
         </Grid>
     </Grid>

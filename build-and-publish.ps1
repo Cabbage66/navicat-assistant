@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $assistantRoot = $PSScriptRoot
 $project = Join-Path $assistantRoot "src\NavicatTextProbe\NavicatTextProbe.csproj"
-$output = Join-Path $assistantRoot "dist\NavicatTextProbe"
+$output = Join-Path $assistantRoot "dist\Assistant"
 $dotnet = Join-Path $env:ProgramFiles "dotnet\dotnet.exe"
 
 if (-not (Test-Path $dotnet)) {
@@ -21,4 +21,4 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Published successfully:" -ForegroundColor Green
-Write-Host (Join-Path $output "NavicatTextProbe.dll")
+Write-Host (Join-Path $output "Assistant.dll")

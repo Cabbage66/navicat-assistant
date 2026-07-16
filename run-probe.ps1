@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $dotnet = Join-Path $env:ProgramFiles "dotnet\dotnet.exe"
-$probe = Join-Path $PSScriptRoot "dist\NavicatTextProbe\NavicatTextProbe.dll"
+$probe = Join-Path $PSScriptRoot "dist\Assistant\Assistant.dll"
 
 if (-not (Test-Path $dotnet)) {
     throw "Windows x64 dotnet was not found: $dotnet"

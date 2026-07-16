@@ -258,10 +258,9 @@ internal sealed class MobileServerService : IAsyncDisposable
                             suggestion = _suggestion,
                             settings = new
                             {
-                                _settings.OverlayEnabled,
                                 _settings.TaskbarPanelEnabled,
+                                _settings.TaskbarWidth,
                                 _settings.MobileServerEnabled,
-                                overlayStyle = _settings.OverlayStyle,
                                 taskbarStyle = _settings.TaskbarStyle,
                                 mobileStyle = _settings.MobileStyle
                             }
@@ -386,7 +385,7 @@ internal sealed class MobileServerService : IAsyncDisposable
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-          <title>Navicat SQL Copilot</title>
+          <title>Assistant</title>
           <style>
             :root{color-scheme:dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#0c1117;color:#f2f5f7}
             body{margin:0;padding:18px;max-width:920px;margin:auto}.card{background:#151d27;border:1px solid #293746;border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 8px 28px #0005}
@@ -397,17 +396,13 @@ internal sealed class MobileServerService : IAsyncDisposable
           </style>
         </head>
         <body>
-          <h1>Navicat SQL Copilot <span id="mode" class="badge">等待</span></h1>
+          <h1>Assistant <span id="mode" class="badge">等待</span></h1>
           <section class="card"><h2>当前最有用的建议</h2><div id="display">等待 Navicat SQL…</div></section>
           <section class="card"><h2>完整建议代码</h2><pre id="insert">—</pre><div id="candidateBlock" hidden><h2>本次 3 个候选（电脑按 Ctrl+Alt+R 切换）</h2><ol id="candidates"></ol></div><h2>为什么</h2><div id="explanation">—</div><ul id="issues"></ul></section>
-          <details class="card"><summary>展示配置</summary><p class="muted">保存后会同步到电脑上的悬浮窗与任务栏内双行建议。</p>
+          <details class="card"><summary>展示配置</summary><p class="muted">保存后会同步到电脑任务栏和当前手机页面。</p>
             <div class="grid">
-              <label><input id="overlayEnabled" type="checkbox"> 开启透明悬浮窗</label><label><input id="taskbarPanelEnabled" type="checkbox"> 开启任务栏内建议</label>
-              <div class="field"><label>悬浮窗字号</label><input id="overlayFont" type="number" min="10" max="48" step="1"></div>
-              <div class="field"><label>悬浮窗行高</label><input id="overlayLine" type="number" min="12" max="72" step="1"></div>
-              <div class="field"><label>悬浮窗背景色</label><input id="overlayBg" type="color"></div>
-              <div class="field"><label>悬浮窗字体色</label><input id="overlayFg" type="color"></div>
-              <div class="field"><label>悬浮窗透明度</label><input id="overlayOpacity" type="number" min="0.05" max="1" step="0.05"></div>
+              <label><input id="taskbarPanelEnabled" type="checkbox"> 开启任务栏内建议</label>
+              <div class="field"><label>任务栏期望宽度</label><input id="taskbarWidth" type="number" min="200" max="1400" step="20"></div>
               <div class="field"><label>任务栏字号</label><input id="taskbarFont" type="number" min="10" max="36" step="1"></div>
               <div class="field"><label>任务栏行高</label><input id="taskbarLine" type="number" min="12" max="54" step="1"></div>
               <div class="field"><label>任务栏背景色</label><input id="taskbarBg" type="color"></div>
@@ -429,12 +424,12 @@ internal sealed class MobileServerService : IAsyncDisposable
               $('issues').replaceChildren(...(s.issues||[]).map(i=>{const li=document.createElement('li');li.textContent=i;return li}));
               const m=c.mobileStyle||{};$('display').style.fontSize=(m.fontSize||18)+'px';$('display').style.lineHeight=(m.lineHeight||28)+'px';$('display').style.color=m.fontColor||'#7df2b1';
               const rgba=(hex,a)=>{const v=(hex||'#151d27').replace('#','');const n=parseInt(v.length===3?v.split('').map(x=>x+x).join(''):v,16);return `rgba(${n>>16},${n>>8&255},${n&255},${a??.96})`};document.querySelectorAll('.card').forEach(x=>x.style.backgroundColor=rgba(m.backgroundColor,m.backgroundOpacity));
-              if(!populated){populated=true;$('overlayEnabled').checked=!!c.overlayEnabled;$('taskbarPanelEnabled').checked=!!c.taskbarPanelEnabled;const o=c.overlayStyle||{},t=c.taskbarStyle||{};
-                $('overlayFont').value=o.fontSize||16;$('overlayLine').value=o.lineHeight||24;$('overlayBg').value=o.backgroundColor||'#17202a';$('overlayFg').value=o.fontColor||'#f8f9f9';$('overlayOpacity').value=o.backgroundOpacity||.82;
+              if(!populated){populated=true;$('taskbarPanelEnabled').checked=!!c.taskbarPanelEnabled;const t=c.taskbarStyle||{};
+                $('taskbarWidth').value=c.taskbarWidth||640;
                 $('taskbarFont').value=t.fontSize||14;$('taskbarLine').value=t.lineHeight||21;$('taskbarBg').value=t.backgroundColor||'#17202a';$('taskbarFg').value=t.fontColor||'#f8f9f9';$('taskbarOpacity').value=t.backgroundOpacity||.92;
                 $('mobileFont').value=m.fontSize||18;$('mobileLine').value=m.lineHeight||28;$('mobileBg').value=m.backgroundColor||'#151d27';$('mobileFg').value=m.fontColor||'#7df2b1';$('mobileOpacity').value=m.backgroundOpacity||.96;}}
               catch(e){$('display').textContent='无法连接电脑端：'+e.message}}
-            $('save').onclick=async()=>{const body={overlayEnabled:$('overlayEnabled').checked,taskbarPanelEnabled:$('taskbarPanelEnabled').checked,overlayFontSize:+$('overlayFont').value,overlayLineHeight:+$('overlayLine').value,overlayBackgroundColor:$('overlayBg').value,overlayFontColor:$('overlayFg').value,overlayOpacity:+$('overlayOpacity').value,taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
+            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,taskbarWidth:+$('taskbarWidth').value,taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
               const r=await fetch(api('/api/settings'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('saved').textContent=r.ok?'已保存':'保存失败';setTimeout(()=>$('saved').textContent='',1800)};
             refresh();setInterval(refresh,1200);
           </script>
@@ -444,13 +439,8 @@ internal sealed class MobileServerService : IAsyncDisposable
 
 internal sealed record MobileSettingsPatch
 {
-    public bool? OverlayEnabled { get; init; }
     public bool? TaskbarPanelEnabled { get; init; }
-    public double? OverlayFontSize { get; init; }
-    public double? OverlayLineHeight { get; init; }
-    public string? OverlayBackgroundColor { get; init; }
-    public string? OverlayFontColor { get; init; }
-    public double? OverlayOpacity { get; init; }
+    public double? TaskbarWidth { get; init; }
     public double? TaskbarFontSize { get; init; }
     public double? TaskbarLineHeight { get; init; }
     public string? TaskbarBackgroundColor { get; init; }

@@ -7,9 +7,7 @@ namespace NavicatTextProbe.Services;
 
 internal enum HotkeyAction
 {
-    ToggleOverlay,
-    ToggleTaskbar,
-    ToggleMobile,
+    ToggleAssistant,
     CycleCandidates,
     AnalyzeSelection
 }

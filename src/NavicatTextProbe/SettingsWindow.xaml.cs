@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media.Imaging;
 using NavicatTextProbe.Models;
 
 namespace NavicatTextProbe;
@@ -11,6 +13,10 @@ public partial class SettingsWindow : Window
     public SettingsWindow(AppSettings settings, bool hasSavedApiKey)
     {
         InitializeComponent();
+        Icon = Imaging.CreateBitmapSourceFromHIcon(
+            System.Drawing.SystemIcons.Application.Handle,
+            Int32Rect.Empty,
+            BitmapSizeOptions.FromEmptyOptions());
         _workingCopy = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(settings)) ?? new AppSettings();
         ApiKeyStatusText.Text = hasSavedApiKey
             ? "Windows 凭据管理器中已经保存了一个 API Key。"
@@ -33,14 +39,9 @@ public partial class SettingsWindow : Window
         DebounceTextBox.Text = _workingCopy.PredictionDebounceMilliseconds.ToString();
         MinimumIntervalTextBox.Text = _workingCopy.PredictionMinimumIntervalMilliseconds.ToString();
 
-        OverlayEnabledCheckBox.IsChecked = _workingCopy.OverlayEnabled;
-        OverlayFontSizeTextBox.Text = _workingCopy.OverlayStyle.FontSize.ToString("0.##");
-        OverlayLineHeightTextBox.Text = _workingCopy.OverlayStyle.LineHeight.ToString("0.##");
-        OverlayOpacityTextBox.Text = _workingCopy.OverlayStyle.BackgroundOpacity.ToString("0.##");
-        OverlayBackgroundTextBox.Text = _workingCopy.OverlayStyle.BackgroundColor;
-        OverlayForegroundTextBox.Text = _workingCopy.OverlayStyle.FontColor;
-
+        AssistantEnabledCheckBox.IsChecked = _workingCopy.AssistantEnabled;
         TaskbarEnabledCheckBox.IsChecked = _workingCopy.TaskbarPanelEnabled;
+        TaskbarWidthTextBox.Text = _workingCopy.TaskbarWidth.ToString("0.##");
         TaskbarFontSizeTextBox.Text = _workingCopy.TaskbarStyle.FontSize.ToString("0.##");
         TaskbarLineHeightTextBox.Text = _workingCopy.TaskbarStyle.LineHeight.ToString("0.##");
         TaskbarOpacityTextBox.Text = _workingCopy.TaskbarStyle.BackgroundOpacity.ToString("0.##");
@@ -56,9 +57,7 @@ public partial class SettingsWindow : Window
         MobileBackgroundTextBox.Text = _workingCopy.MobileStyle.BackgroundColor;
         MobileForegroundTextBox.Text = _workingCopy.MobileStyle.FontColor;
         KeyboardFallbackCheckBox.IsChecked = _workingCopy.KeyboardFallbackEnabled;
-        OverlayHotkeyTextBox.Text = _workingCopy.ToggleOverlayHotkey;
-        TaskbarHotkeyTextBox.Text = _workingCopy.ToggleTaskbarHotkey;
-        MobileHotkeyTextBox.Text = _workingCopy.ToggleMobileHotkey;
+        AssistantHotkeyTextBox.Text = _workingCopy.ToggleAssistantHotkey;
         AnalyzeHotkeyTextBox.Text = _workingCopy.AnalyzeSelectionHotkey;
         CandidateHotkeyTextBox.Text = _workingCopy.CycleCandidatesHotkey;
     }
@@ -68,9 +67,7 @@ public partial class SettingsWindow : Window
         if (!int.TryParse(DebounceTextBox.Text, out var debounce) ||
             !int.TryParse(MinimumIntervalTextBox.Text, out var minimumInterval) ||
             !int.TryParse(MobilePortTextBox.Text, out var port) ||
-            !double.TryParse(OverlayFontSizeTextBox.Text, out var overlayFontSize) ||
-            !double.TryParse(OverlayLineHeightTextBox.Text, out var overlayLineHeight) ||
-            !double.TryParse(OverlayOpacityTextBox.Text, out var overlayOpacity) ||
+            !double.TryParse(TaskbarWidthTextBox.Text, out var taskbarWidth) ||
             !double.TryParse(TaskbarFontSizeTextBox.Text, out var taskbarFontSize) ||
             !double.TryParse(TaskbarLineHeightTextBox.Text, out var taskbarLineHeight) ||
             !double.TryParse(TaskbarOpacityTextBox.Text, out var taskbarOpacity) ||
@@ -78,7 +75,7 @@ public partial class SettingsWindow : Window
             !double.TryParse(MobileLineHeightTextBox.Text, out var mobileLineHeight) ||
             !double.TryParse(MobileOpacityTextBox.Text, out var mobileOpacity))
         {
-            System.Windows.MessageBox.Show(this, "字号、行高、透明度、端口和等待时间必须填写有效数字。", "设置无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
+            System.Windows.MessageBox.Show(this, "宽度、字号、行高、透明度、端口和等待时间必须填写有效数字。", "设置无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
@@ -88,13 +85,9 @@ public partial class SettingsWindow : Window
         _workingCopy.CustomGlobalPrompt = GlobalPromptTextBox.Text;
         _workingCopy.PredictionDebounceMilliseconds = debounce;
         _workingCopy.PredictionMinimumIntervalMilliseconds = minimumInterval;
-        _workingCopy.OverlayEnabled = OverlayEnabledCheckBox.IsChecked == true;
-        _workingCopy.OverlayStyle.FontSize = overlayFontSize;
-        _workingCopy.OverlayStyle.LineHeight = overlayLineHeight;
-        _workingCopy.OverlayStyle.BackgroundOpacity = overlayOpacity;
-        _workingCopy.OverlayStyle.BackgroundColor = OverlayBackgroundTextBox.Text.Trim();
-        _workingCopy.OverlayStyle.FontColor = OverlayForegroundTextBox.Text.Trim();
+        _workingCopy.AssistantEnabled = AssistantEnabledCheckBox.IsChecked == true;
         _workingCopy.TaskbarPanelEnabled = TaskbarEnabledCheckBox.IsChecked == true;
+        _workingCopy.TaskbarWidth = taskbarWidth;
         _workingCopy.TaskbarStyle.FontSize = taskbarFontSize;
         _workingCopy.TaskbarStyle.LineHeight = taskbarLineHeight;
         _workingCopy.TaskbarStyle.BackgroundOpacity = taskbarOpacity;
@@ -109,9 +102,7 @@ public partial class SettingsWindow : Window
         _workingCopy.MobileStyle.BackgroundColor = MobileBackgroundTextBox.Text.Trim();
         _workingCopy.MobileStyle.FontColor = MobileForegroundTextBox.Text.Trim();
         _workingCopy.KeyboardFallbackEnabled = KeyboardFallbackCheckBox.IsChecked == true;
-        _workingCopy.ToggleOverlayHotkey = OverlayHotkeyTextBox.Text.Trim();
-        _workingCopy.ToggleTaskbarHotkey = TaskbarHotkeyTextBox.Text.Trim();
-        _workingCopy.ToggleMobileHotkey = MobileHotkeyTextBox.Text.Trim();
+        _workingCopy.ToggleAssistantHotkey = AssistantHotkeyTextBox.Text.Trim();
         _workingCopy.AnalyzeSelectionHotkey = AnalyzeHotkeyTextBox.Text.Trim();
         _workingCopy.CycleCandidatesHotkey = CandidateHotkeyTextBox.Text.Trim();
 

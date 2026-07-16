@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using NavicatTextProbe.Models;
@@ -10,11 +11,15 @@ namespace NavicatTextProbe;
 
 public partial class TaskbarSuggestionWindow : Window
 {
-    private readonly DispatcherTimer _positionTimer = new() { Interval = TimeSpan.FromSeconds(2) };
+    private readonly DispatcherTimer _positionTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private HwndSource? _windowSource;
+    private nint _windowHandle;
+    private double _preferredWidth = 640;
 
     public TaskbarSuggestionWindow()
     {
         InitializeComponent();
+        SourceInitialized += (_, _) => ConfigureToolWindow();
         _positionTimer.Tick += (_, _) =>
         {
             if (IsVisible) Reposition();
@@ -31,15 +36,29 @@ public partial class TaskbarSuggestionWindow : Window
                 _positionTimer.Stop();
             }
         };
-        Closed += (_, _) => _positionTimer.Stop();
+        StateChanged += (_, _) =>
+        {
+            if (IsVisible && WindowState == WindowState.Minimized)
+            {
+                WindowState = WindowState.Normal;
+                Reposition();
+            }
+        };
+        Closed += (_, _) =>
+        {
+            _positionTimer.Stop();
+            _windowSource?.RemoveHook(WindowProc);
+            _windowSource = null;
+        };
     }
 
     public event EventHandler? SettingsRequested;
 
-    public event EventHandler? HideRequested;
+    public event EventHandler? HideAssistantRequested;
 
-    public void UpdateSuggestion(SuggestionResult suggestion, DisplayStyle style)
+    public void UpdateSuggestion(SuggestionResult suggestion, DisplayStyle style, double preferredWidth)
     {
+        _preferredWidth = Math.Clamp(preferredWidth, 200, 1400);
         var displayText = string.IsNullOrWhiteSpace(suggestion.DisplayText)
             ? "当前没有可靠建议"
             : suggestion.DisplayText;
@@ -90,7 +109,7 @@ public partial class TaskbarSuggestionWindow : Window
         int leftPixels;
         if (availableWidthPixels >= (int)(200 * scale))
         {
-            actualWidthPixels = Math.Min((int)(340 * scale), availableWidthPixels);
+            actualWidthPixels = Math.Min((int)(_preferredWidth * scale), availableWidthPixels);
             leftPixels = rightPixels - actualWidthPixels - paddingPixels;
         }
         else
@@ -109,7 +128,8 @@ public partial class TaskbarSuggestionWindow : Window
     private void RepositionFallback()
     {
         var workArea = SystemParameters.WorkArea;
-        SetGeometry(workArea.Right - 352, workArea.Bottom - 46, 340, 42);
+        var width = Math.Min(_preferredWidth, Math.Max(200, workArea.Width - 12));
+        SetGeometry(workArea.Right - width - 6, workArea.Bottom - 46, width, 42);
     }
 
     private void SetGeometry(double left, double top, double width, double height)
@@ -118,6 +138,56 @@ public partial class TaskbarSuggestionWindow : Window
         if (double.IsNaN(Top) || Math.Abs(Top - top) > 0.5) Top = top;
         if (Math.Abs(Width - width) > 0.5) Width = width;
         if (Math.Abs(Height - height) > 0.5) Height = height;
+        KeepAboveWindowsWithoutActivation();
+    }
+
+    private void ConfigureToolWindow()
+    {
+        _windowHandle = new WindowInteropHelper(this).Handle;
+        if (_windowHandle == 0)
+        {
+            return;
+        }
+
+        var extendedStyle = NativeMethods.GetWindowLongPtr(_windowHandle, NativeMethods.GwlExStyle).ToInt64();
+        extendedStyle |= NativeMethods.WsExToolWindow | NativeMethods.WsExNoActivate;
+        extendedStyle &= ~NativeMethods.WsExAppWindow;
+        _ = NativeMethods.SetWindowLongPtr(_windowHandle, NativeMethods.GwlExStyle, new nint(extendedStyle));
+
+        _windowSource = HwndSource.FromHwnd(_windowHandle);
+        _windowSource?.AddHook(WindowProc);
+        KeepAboveWindowsWithoutActivation();
+    }
+
+    private nint WindowProc(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
+    {
+        if (message == NativeMethods.WmMouseActivate)
+        {
+            handled = true;
+            return NativeMethods.MaNoActivate;
+        }
+
+        return 0;
+    }
+
+    private void KeepAboveWindowsWithoutActivation()
+    {
+        if (_windowHandle == 0 || !IsVisible)
+        {
+            return;
+        }
+
+        _ = NativeMethods.SetWindowPos(
+            _windowHandle,
+            NativeMethods.HwndTopmost,
+            0,
+            0,
+            0,
+            0,
+            NativeMethods.SwpNoMove |
+            NativeMethods.SwpNoSize |
+            NativeMethods.SwpNoActivate |
+            NativeMethods.SwpShowWindow);
     }
 
     private static SolidColorBrush ParseBrush(string value, Color fallback, double opacity = 1)
@@ -140,5 +210,5 @@ public partial class TaskbarSuggestionWindow : Window
         SettingsRequested?.Invoke(this, EventArgs.Empty);
 
     private void HideMenuItem_OnClick(object sender, RoutedEventArgs e) =>
-        HideRequested?.Invoke(this, EventArgs.Empty);
+        HideAssistantRequested?.Invoke(this, EventArgs.Empty);
 }

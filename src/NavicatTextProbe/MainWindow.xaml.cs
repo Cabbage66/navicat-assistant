@@ -5,6 +5,7 @@ using System.Text;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using NavicatTextProbe.Models;
 using NavicatTextProbe.Services;
@@ -23,7 +24,6 @@ public partial class MainWindow : Window
     private readonly GlobalHotkeyService _hotkeyService = new();
     private readonly KeyboardFallbackService _keyboardFallbackService = new();
     private readonly MobileServerService _mobileServer = new();
-    private readonly SuggestionOverlayWindow _overlayWindow = new();
     private readonly TaskbarSuggestionWindow _taskbarWindow = new();
     private readonly TrayIconService _trayIcon;
     private readonly StringBuilder _fallbackText = new();
@@ -32,7 +32,6 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _predictionCancellation;
     private ProbeResult? _lastCapturedProbe;
     private SuggestionResult _currentSuggestion = SuggestionResult.Info("等待 Navicat SQL……");
-    private bool _isMonitoring = true;
     private bool _captureInProgress;
     private bool _exitRequested;
     private bool _fallbackSessionInitialized;
@@ -56,6 +55,10 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Icon = Imaging.CreateBitmapSourceFromHIcon(
+            System.Drawing.SystemIcons.Application.Handle,
+            Int32Rect.Empty,
+            BitmapSizeOptions.FromEmptyOptions());
         var assistantRoot = WorkspacePaths.FindAssistantRoot();
         _logger = new ProbeLogger(Path.Combine(assistantRoot, "logs"));
         _settingsService = new SettingsService(assistantRoot);
@@ -71,18 +74,8 @@ public partial class MainWindow : Window
         Closing += MainWindow_OnClosing;
         Closed += MainWindow_OnClosed;
 
-        _overlayWindow.SettingsRequested += (_, _) => OpenSettings();
-        _overlayWindow.HideRequested += (_, _) => SetOverlayEnabled(false);
-        _overlayWindow.LocationChanged += (_, _) =>
-        {
-            if (_overlayWindow.IsLoaded)
-            {
-                _settingsService.Current.OverlayLeft = _overlayWindow.Left;
-                _settingsService.Current.OverlayTop = _overlayWindow.Top;
-            }
-        };
         _taskbarWindow.SettingsRequested += (_, _) => OpenSettings();
-        _taskbarWindow.HideRequested += (_, _) => SetTaskbarEnabled(false);
+        _taskbarWindow.HideAssistantRequested += (_, _) => SetAssistantEnabledAsync(false).Forget();
 
         _hotkeyService.Pressed += HotkeyService_OnPressed;
         _keyboardFallbackService.InputCaptured += KeyboardFallbackService_OnInputCaptured;
@@ -90,7 +83,8 @@ public partial class MainWindow : Window
 
         _trayIcon.OpenRequested += (_, _) => Dispatcher.Invoke(ShowMainWindow);
         _trayIcon.SettingsRequested += (_, _) => Dispatcher.Invoke(OpenSettings);
-        _trayIcon.ToggleOverlayRequested += (_, _) => Dispatcher.Invoke(() => SetOverlayEnabled(!_settingsService.Current.OverlayEnabled));
+        _trayIcon.ToggleAssistantRequested += (_, _) => Dispatcher.Invoke(() =>
+            SetAssistantEnabledAsync(!_settingsService.Current.AssistantEnabled).Forget());
         _trayIcon.ToggleTaskbarRequested += (_, _) => Dispatcher.Invoke(() => SetTaskbarEnabled(!_settingsService.Current.TaskbarPanelEnabled));
         _trayIcon.ToggleMobileRequested += (_, _) => Dispatcher.Invoke(() => ToggleMobileAsync().Forget());
         _trayIcon.ExitRequested += (_, _) => Dispatcher.Invoke(() => ExitAsync().Forget());
@@ -100,19 +94,31 @@ public partial class MainWindow : Window
     {
         _logger.WriteSessionStarted();
         _logger.WriteConfiguration(_settingsService.Current);
-        _logger.WriteHealthSnapshot();
+        if (_settingsService.Current.AssistantEnabled)
+        {
+            _logger.WriteHealthSnapshot();
+        }
         _lastHealthSnapshotAt = DateTimeOffset.UtcNow;
-        _probeTimer.Start();
         await ApplySettingsAsync();
-        await RefreshFirewallStatusAsync();
+        if (_settingsService.Current.AssistantEnabled && _settingsService.Current.MobileServerEnabled)
+        {
+            await RefreshFirewallStatusAsync();
+        }
+        else
+        {
+            FirewallStatusText.Text = "防火墙：手机服务未运行，暂不检测";
+        }
         UpdateSuggestion(_apiKey is null
             ? SuggestionResult.Info("请先打开设置，保存撤销旧 Key 后生成的新 DeepSeek API Key")
             : _currentSuggestion);
     }
 
     private async void ProbeTimer_OnTick(object? sender, EventArgs e)
+        => await CaptureNowAsync(forceRefresh: false);
+
+    private async Task CaptureNowAsync(bool forceRefresh)
     {
-        if (!_isMonitoring || _captureInProgress)
+        if (!_settingsService.Current.AssistantEnabled || _captureInProgress)
         {
             return;
         }
@@ -120,9 +126,13 @@ public partial class MainWindow : Window
         _captureInProgress = true;
         try
         {
-            var result = await Task.Run(() => _probeService.CaptureForegroundNavicat());
-            ApplyProbeResult(result);
-            if (DateTimeOffset.UtcNow - _lastHealthSnapshotAt >= TimeSpan.FromMinutes(1))
+            var result = await Task.Run(() => _probeService.CaptureForegroundNavicat(forceRefresh));
+            if (_settingsService.Current.AssistantEnabled)
+            {
+                ApplyProbeResult(result);
+            }
+            if (_settingsService.Current.AssistantEnabled &&
+                DateTimeOffset.UtcNow - _lastHealthSnapshotAt >= TimeSpan.FromMinutes(1))
             {
                 _logger.WriteHealthSnapshot();
                 _lastHealthSnapshotAt = DateTimeOffset.UtcNow;
@@ -248,7 +258,9 @@ public partial class MainWindow : Window
 
     private void SchedulePrediction(ProbeResult probe, bool immediate = false)
     {
-        if (!_settingsService.Current.AiEnabled || string.IsNullOrWhiteSpace(probe.Text))
+        if (!_settingsService.Current.AssistantEnabled ||
+            !_settingsService.Current.AiEnabled ||
+            string.IsNullOrWhiteSpace(probe.Text))
         {
             return;
         }
@@ -355,6 +367,12 @@ public partial class MainWindow : Window
 
     private async Task CycleCandidatesAsync()
     {
+        if (!_settingsService.Current.AssistantEnabled)
+        {
+            UpdateSuggestion(SuggestionResult.Info($"Assistant 已关闭；按 {_settingsService.Current.ToggleAssistantHotkey} 开启"));
+            return;
+        }
+
         if (_candidateRequestInProgress)
         {
             SuggestionExplanationText.Text = "正在生成 3 个候选，请稍候；完成后再按一次会切换到下一个。";
@@ -407,7 +425,7 @@ public partial class MainWindow : Window
         var token = _predictionCancellation.Token;
         _candidateRequestInProgress = true;
         _manualCandidateRequestProbeKey = probeKey;
-        SuggestionExplanationText.Text = "正在按当前精确光标生成 3 个候选；生成期间保留现有建议，避免悬浮窗闪烁。";
+        SuggestionExplanationText.Text = "正在按当前精确光标生成 3 个候选；生成期间保留现有任务栏建议，避免闪烁。";
 
         try
         {
@@ -491,6 +509,12 @@ public partial class MainWindow : Window
 
     private async Task AnalyzeSelectionAsync(bool copyFromNavicat)
     {
+        if (!_settingsService.Current.AssistantEnabled)
+        {
+            UpdateSuggestion(SuggestionResult.Info($"Assistant 已关闭；按 {_settingsService.Current.ToggleAssistantHotkey} 开启"));
+            return;
+        }
+
         string selectedSql;
         if (copyFromNavicat)
         {
@@ -579,8 +603,10 @@ public partial class MainWindow : Window
             _suggestionViewDirty = true;
         }
 
-        _overlayWindow.UpdateSuggestion(suggestion, _settingsService.Current.OverlayStyle);
-        _taskbarWindow.UpdateSuggestion(suggestion, _settingsService.Current.TaskbarStyle);
+        _taskbarWindow.UpdateSuggestion(
+            suggestion,
+            _settingsService.Current.TaskbarStyle,
+            _settingsService.Current.TaskbarWidth);
         _mobileServer.UpdateSuggestion(suggestion, _settingsService.Current);
     }
 
@@ -597,7 +623,7 @@ public partial class MainWindow : Window
         };
         SuggestionDisplayText.Text = string.IsNullOrWhiteSpace(suggestion.DisplayText) ? "当前没有足够可靠的建议" : suggestion.DisplayText;
         SuggestionExplanationText.Text = string.IsNullOrWhiteSpace(suggestion.Explanation)
-            ? suggestion.IsLoading ? "输入变化时，旧请求会自动取消。" : "短建议显示在悬浮窗；完整内容可在此处和手机端查看。"
+            ? suggestion.IsLoading ? "输入变化时，旧请求会自动取消。" : "短建议显示在任务栏；完整内容可在此处和手机端查看。"
             : suggestion.Explanation;
         SuggestionInsertTextBox.Text = string.IsNullOrWhiteSpace(suggestion.InsertText) ? "—" : suggestion.InsertText;
         IssuesText.Text = suggestion.HasCandidates
@@ -653,6 +679,19 @@ public partial class MainWindow : Window
     {
         var settings = _settingsService.Current;
         _trayIcon.UpdateState(settings);
+        ToggleButton.Content = settings.AssistantEnabled ? "隐藏 Assistant" : "显示 Assistant";
+
+        if (!settings.AssistantEnabled)
+        {
+            StopAssistantActivity();
+            _taskbarWindow.Hide();
+            await _mobileServer.StopAsync();
+            RegisterHotkeys();
+            UpdateChannelStatus();
+            return;
+        }
+
+        _probeTimer.Start();
         var needsKeyboardFallback = settings.KeyboardFallbackEnabled &&
                                     _lastStateKey?.StartsWith(ProbeStatus.NoReadableText.ToString(), StringComparison.Ordinal) == true;
         if (needsKeyboardFallback)
@@ -664,28 +703,7 @@ public partial class MainWindow : Window
             _keyboardFallbackService.Stop();
         }
 
-        _overlayWindow.UpdateSuggestion(_currentSuggestion, settings.OverlayStyle);
-        if (settings.OverlayLeft is double left && settings.OverlayTop is double top)
-        {
-            _overlayWindow.Left = left;
-            _overlayWindow.Top = top;
-        }
-        else if (double.IsNaN(_overlayWindow.Left) || double.IsNaN(_overlayWindow.Top))
-        {
-            var workArea = SystemParameters.WorkArea;
-            _overlayWindow.Left = Math.Max(workArea.Left, workArea.Right - _overlayWindow.Width - 36);
-            _overlayWindow.Top = workArea.Top + 72;
-        }
-        if (settings.OverlayEnabled)
-        {
-            if (!_overlayWindow.IsVisible) _overlayWindow.Show();
-        }
-        else
-        {
-            _overlayWindow.Hide();
-        }
-
-        _taskbarWindow.UpdateSuggestion(_currentSuggestion, settings.TaskbarStyle);
+        _taskbarWindow.UpdateSuggestion(_currentSuggestion, settings.TaskbarStyle, settings.TaskbarWidth);
         if (settings.TaskbarPanelEnabled)
         {
             if (!_taskbarWindow.IsVisible) _taskbarWindow.Show();
@@ -712,20 +730,39 @@ public partial class MainWindow : Window
         UpdateChannelStatus();
     }
 
+    private void StopAssistantActivity()
+    {
+        _probeTimer.Stop();
+        _keyboardFallbackService.Stop();
+        _predictionCancellation?.Cancel();
+        _predictionInFlightContext = null;
+        _candidateRequestInProgress = false;
+        _manualCandidateRequestProbeKey = null;
+        FlushPendingCaptureLog(force: true);
+        StatusText.Text = "Assistant 已关闭";
+        DetailText.Text = $"探测、AI、任务栏提示和手机服务均已停止；按 {_settingsService.Current.ToggleAssistantHotkey} 重新开启。";
+        StatusDot.Fill = Brush(127, 140, 141);
+    }
+
     private void RegisterHotkeys()
     {
         if (new WindowInteropHelper(this).Handle == 0) return;
         var settings = _settingsService.Current;
-        var errors = _hotkeyService.Register(new WindowInteropHelper(this).Handle, new Dictionary<HotkeyAction, string>
+        var shortcuts = new Dictionary<HotkeyAction, string>
         {
-            [HotkeyAction.ToggleOverlay] = settings.ToggleOverlayHotkey,
-            [HotkeyAction.ToggleTaskbar] = settings.ToggleTaskbarHotkey,
-            [HotkeyAction.ToggleMobile] = settings.ToggleMobileHotkey,
-            [HotkeyAction.CycleCandidates] = settings.CycleCandidatesHotkey,
-            [HotkeyAction.AnalyzeSelection] = settings.AnalyzeSelectionHotkey
-        });
+            [HotkeyAction.ToggleAssistant] = settings.ToggleAssistantHotkey
+        };
+        if (settings.AssistantEnabled)
+        {
+            shortcuts[HotkeyAction.CycleCandidates] = settings.CycleCandidatesHotkey;
+            shortcuts[HotkeyAction.AnalyzeSelection] = settings.AnalyzeSelectionHotkey;
+        }
+
+        var errors = _hotkeyService.Register(new WindowInteropHelper(this).Handle, shortcuts);
         HotkeyStatusText.Text = errors.Count == 0
-            ? $"续写候选：{settings.CycleCandidatesHotkey} | 诊断：{settings.AnalyzeSelectionHotkey}"
+            ? settings.AssistantEnabled
+                ? $"整体启停：{settings.ToggleAssistantHotkey} | 续写候选：{settings.CycleCandidatesHotkey} | 诊断：{settings.AnalyzeSelectionHotkey}"
+                : $"整体启停：{settings.ToggleAssistantHotkey}（其余快捷键已停用）"
             : string.Join("；", errors);
     }
 
@@ -733,9 +770,9 @@ public partial class MainWindow : Window
     {
         switch (action)
         {
-            case HotkeyAction.ToggleOverlay: SetOverlayEnabled(!_settingsService.Current.OverlayEnabled); break;
-            case HotkeyAction.ToggleTaskbar: SetTaskbarEnabled(!_settingsService.Current.TaskbarPanelEnabled); break;
-            case HotkeyAction.ToggleMobile: ToggleMobileAsync().Forget(); break;
+            case HotkeyAction.ToggleAssistant:
+                SetAssistantEnabledAsync(!_settingsService.Current.AssistantEnabled).Forget();
+                break;
             case HotkeyAction.CycleCandidates: CycleCandidatesAsync().Forget(); break;
             case HotkeyAction.AnalyzeSelection: AnalyzeSelectionAsync(true).Forget(); break;
         }
@@ -745,6 +782,11 @@ public partial class MainWindow : Window
     {
         Dispatcher.BeginInvoke(() =>
         {
+            if (!_settingsService.Current.AssistantEnabled)
+            {
+                return;
+            }
+
             InitializeFallbackSession();
             var text = input.Kind == KeyboardFallbackInputKind.Paste ? SafeClipboardText() : input.Text;
             if (input.Kind == KeyboardFallbackInputKind.Backspace)
@@ -811,13 +853,8 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(() =>
         {
             var settings = _settingsService.Current;
-            if (patch.OverlayEnabled is bool overlay) settings.OverlayEnabled = overlay;
             if (patch.TaskbarPanelEnabled is bool taskbar) settings.TaskbarPanelEnabled = taskbar;
-            if (patch.OverlayFontSize is double of) settings.OverlayStyle.FontSize = of;
-            if (patch.OverlayLineHeight is double ol) settings.OverlayStyle.LineHeight = ol;
-            if (!string.IsNullOrWhiteSpace(patch.OverlayBackgroundColor)) settings.OverlayStyle.BackgroundColor = patch.OverlayBackgroundColor;
-            if (!string.IsNullOrWhiteSpace(patch.OverlayFontColor)) settings.OverlayStyle.FontColor = patch.OverlayFontColor;
-            if (patch.OverlayOpacity is double oo) settings.OverlayStyle.BackgroundOpacity = oo;
+            if (patch.TaskbarWidth is double width) settings.TaskbarWidth = width;
             if (patch.TaskbarFontSize is double tf) settings.TaskbarStyle.FontSize = tf;
             if (patch.TaskbarLineHeight is double tl) settings.TaskbarStyle.LineHeight = tl;
             if (!string.IsNullOrWhiteSpace(patch.TaskbarBackgroundColor)) settings.TaskbarStyle.BackgroundColor = patch.TaskbarBackgroundColor;
@@ -833,11 +870,24 @@ public partial class MainWindow : Window
         });
     }
 
-    private void SetOverlayEnabled(bool enabled)
+    private async Task SetAssistantEnabledAsync(bool enabled)
     {
-        _settingsService.Current.OverlayEnabled = enabled;
+        _settingsService.Current.AssistantEnabled = enabled;
         _settingsService.Save(_settingsService.Current);
-        ApplySettingsAsync().Forget();
+        if (enabled)
+        {
+            _lastPredictionContext = null;
+            _predictionInFlightContext = null;
+            StatusText.Text = "Assistant 正在恢复探测……";
+            DetailText.Text = "正在读取当前 Navicat SQL 并自动开始分析。";
+            StatusDot.Fill = Brush(243, 156, 18);
+        }
+
+        await ApplySettingsAsync();
+        if (enabled)
+        {
+            await CaptureNowAsync(forceRefresh: true);
+        }
     }
 
     private void SetTaskbarEnabled(bool enabled)
@@ -857,8 +907,10 @@ public partial class MainWindow : Window
     private void UpdateChannelStatus()
     {
         var settings = _settingsService.Current;
-        OverlayStatusText.Text = $"悬浮窗：{(settings.OverlayEnabled ? "开启" : "关闭")}（{settings.ToggleOverlayHotkey}）";
-        TaskbarStatusText.Text = $"任务栏内建议：{(settings.TaskbarPanelEnabled ? "开启" : "关闭")}（{settings.ToggleTaskbarHotkey}）";
+        AssistantStatusText.Text = $"Assistant：{(settings.AssistantEnabled ? "运行中" : "已关闭")}（{settings.ToggleAssistantHotkey}）";
+        TaskbarStatusText.Text = settings.AssistantEnabled
+            ? $"任务栏内建议：{(settings.TaskbarPanelEnabled ? "开启" : "关闭")}（期望宽度 {settings.TaskbarWidth:0}）"
+            : "任务栏内建议：随 Assistant 停止";
         if (_mobileServer.IsRunning)
         {
             var urls = _mobileServer.GetAccessUrls(settings);
@@ -866,13 +918,15 @@ public partial class MainWindow : Window
             var lan = urls.FirstOrDefault(url => !url.Contains("127.0.0.1", StringComparison.Ordinal));
             MobileStatusText.Text = lan is null
                 ? $"手机页面：已开启，但没有找到可用局域网地址。\n电脑：{local}"
-                : $"手机页面：已开启（{settings.ToggleMobileHotkey}）\n手机首选：{lan}\n电脑本机：{local}";
+                : $"手机页面：已开启\n手机首选：{lan}\n电脑本机：{local}";
         }
         else
         {
-            MobileStatusText.Text = settings.MobileServerEnabled
-                ? $"手机页面：启动失败 — {_mobileServer.LastError}"
-                : $"手机页面：关闭（{settings.ToggleMobileHotkey}）";
+            MobileStatusText.Text = !settings.AssistantEnabled
+                ? "手机页面：随 Assistant 停止"
+                : settings.MobileServerEnabled
+                    ? $"手机页面：启动失败 — {_mobileServer.LastError}"
+                    : "手机页面：关闭";
         }
     }
 
@@ -888,12 +942,20 @@ public partial class MainWindow : Window
             _apiKey = SafeReadApiKey();
             _lastPredictionContext = null;
             _settingsService.Save(dialog.UpdatedSettings);
-            ApplySettingsAsync().Forget();
-            if (_lastCapturedProbe is not null) SchedulePrediction(_lastCapturedProbe, true);
+            ApplySettingsAfterSaveAsync().Forget();
         }
         catch (Exception ex)
         {
             System.Windows.MessageBox.Show(this, ex.Message, "设置保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async Task ApplySettingsAfterSaveAsync()
+    {
+        await ApplySettingsAsync();
+        if (_settingsService.Current.AssistantEnabled)
+        {
+            await CaptureNowAsync(forceRefresh: true);
         }
     }
 
@@ -914,24 +976,8 @@ public partial class MainWindow : Window
         Activate();
     }
 
-    private void ToggleButton_OnClick(object sender, RoutedEventArgs e)
-    {
-        _isMonitoring = !_isMonitoring;
-        ToggleButton.Content = _isMonitoring ? "暂停探测" : "继续探测";
-        if (_isMonitoring)
-        {
-            _probeTimer.Start();
-            StatusText.Text = "正在等待 Navicat……";
-            StatusDot.Fill = Brush(243, 156, 18);
-        }
-        else
-        {
-            _probeTimer.Stop();
-            _keyboardFallbackService.Stop();
-            StatusText.Text = "探测已暂停";
-            StatusDot.Fill = Brush(127, 140, 141);
-        }
-    }
+    private void ToggleButton_OnClick(object sender, RoutedEventArgs e) =>
+        SetAssistantEnabledAsync(!_settingsService.Current.AssistantEnabled).Forget();
 
     private void SettingsButton_OnClick(object sender, RoutedEventArgs e) => OpenSettings();
 
@@ -1021,7 +1067,7 @@ public partial class MainWindow : Window
         if (_exitRequested) return;
         e.Cancel = true;
         Hide();
-        _trayIcon.ShowBalloon("Navicat SQL Copilot 仍在运行", "双击托盘图标可重新打开；右键可切换输出或退出。");
+        _trayIcon.ShowBalloon("Assistant 仍在运行", "双击托盘图标可重新打开；Ctrl+Alt+S 可整体启停。");
     }
 
     private async Task ExitAsync()
@@ -1043,7 +1089,6 @@ public partial class MainWindow : Window
         _keyboardFallbackService.Dispose();
         _deepSeekClient.Dispose();
         _trayIcon.Dispose();
-        _overlayWindow.Close();
         _taskbarWindow.Close();
         _logger.Dispose();
     }

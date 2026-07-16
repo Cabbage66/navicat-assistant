@@ -1,7 +1,7 @@
 <Window x:Class="NavicatTextProbe.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Navicat SQL Copilot 设置"
+        Title="Assistant 设置"
         Width="820" Height="720" MinWidth="700" MinHeight="580"
         WindowStartupLocation="CenterOwner" Background="#F4F6F8">
     <Grid Margin="18">
@@ -66,39 +66,19 @@
             <TabItem Header="展示与样式">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Margin="16">
-                        <CheckBox x:Name="OverlayEnabledCheckBox" FontSize="15" FontWeight="SemiBold"
-                                  Content="启用透明悬浮窗" />
-                        <Grid Margin="22,10,0,22">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="130" />
-                                <ColumnDefinition Width="110" />
-                                <ColumnDefinition Width="130" />
-                                <ColumnDefinition Width="110" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock VerticalAlignment="Center" Text="字号" />
-                            <TextBox x:Name="OverlayFontSizeTextBox" Grid.Column="1" Padding="6,2" />
-                            <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="行高" />
-                            <TextBox x:Name="OverlayLineHeightTextBox" Grid.Column="3" Padding="6,2" />
-                            <TextBlock Grid.Row="1" Margin="0,8,0,0" VerticalAlignment="Center" Text="背景透明度 0-1" />
-                            <TextBox x:Name="OverlayOpacityTextBox" Grid.Row="1" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
-                            <TextBlock Grid.Row="2" Margin="0,8,0,0" VerticalAlignment="Center" Text="背景色" />
-                            <TextBox x:Name="OverlayBackgroundTextBox" Grid.Row="2" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
-                            <TextBlock Grid.Row="2" Grid.Column="2" Margin="0,8,0,0" VerticalAlignment="Center" Text="字体色" />
-                            <TextBox x:Name="OverlayForegroundTextBox" Grid.Row="2" Grid.Column="3" Margin="0,8,0,0" Padding="6,2" />
-                        </Grid>
+                        <CheckBox x:Name="AssistantEnabledCheckBox" FontSize="15" FontWeight="SemiBold"
+                                  Content="启用 Assistant" />
+                        <TextBlock Margin="22,5,0,18" Foreground="#667788" TextWrapping="Wrap"
+                                   Text="关闭时会停止探测、AI 请求、键盘兜底、任务栏提示和手机服务；Ctrl+Alt+S 可随时整体开启或关闭。" />
 
                         <Separator />
                         <CheckBox x:Name="TaskbarEnabledCheckBox" Margin="0,20,0,0" FontSize="15" FontWeight="SemiBold"
                                   Content="启用任务栏内双行建议" />
                         <TextBlock Margin="22,5,0,0" Foreground="#667788" TextWrapping="Wrap"
-                                   Text="显示在 Windows 11 任务栏内、通知区域左侧的空白位置；最多两行，不修改或注入 Explorer。" />
+                                   Text="显示在 Windows 11 任务栏内、通知区域左侧的空白位置；无边框、最多两行，不参与 Alt+Tab，也不修改或注入 Explorer。" />
                         <Grid Margin="22,10,0,10">
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
@@ -120,6 +100,10 @@
                                 <TextBlock VerticalAlignment="Center" Text="字体色" />
                                 <TextBox x:Name="TaskbarForegroundTextBox" Width="82" Margin="8,0,0,0" Padding="6,2" />
                             </StackPanel>
+                            <TextBlock Grid.Row="2" Margin="0,8,0,0" VerticalAlignment="Center" Text="期望宽度（像素）" />
+                            <TextBox x:Name="TaskbarWidthTextBox" Grid.Row="2" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
+                            <TextBlock Grid.Row="2" Grid.Column="2" Grid.ColumnSpan="2" Margin="0,8,0,0" VerticalAlignment="Center"
+                                       Foreground="#667788" Text="200–1400；空白位置不足时自动缩窄" />
                         </Grid>
                     </StackPanel>
                 </ScrollViewer>
@@ -162,23 +146,17 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="210" />
                                 <ColumnDefinition Width="180" />
                             </Grid.ColumnDefinitions>
-                            <TextBlock VerticalAlignment="Center" Text="显示/隐藏悬浮窗" />
-                            <TextBox x:Name="OverlayHotkeyTextBox" Grid.Column="1" Padding="6,2" />
-                            <TextBlock Grid.Row="1" Margin="0,8,0,0" VerticalAlignment="Center" Text="显示/隐藏任务栏内建议" />
-                            <TextBox x:Name="TaskbarHotkeyTextBox" Grid.Row="1" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
-                            <TextBlock Grid.Row="2" Margin="0,8,0,0" VerticalAlignment="Center" Text="开启/关闭手机服务" />
-                            <TextBox x:Name="MobileHotkeyTextBox" Grid.Row="2" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
-                            <TextBlock Grid.Row="3" Margin="0,8,0,0" VerticalAlignment="Center" Text="分析 Navicat 选中 SQL" />
-                            <TextBox x:Name="AnalyzeHotkeyTextBox" Grid.Row="3" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
-                            <TextBlock Grid.Row="4" Margin="0,8,0,0" VerticalAlignment="Center" Text="生成/切换 3 个续写候选" />
-                            <TextBox x:Name="CandidateHotkeyTextBox" Grid.Row="4" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
+                            <TextBlock VerticalAlignment="Center" Text="整体显示/隐藏并启停" />
+                            <TextBox x:Name="AssistantHotkeyTextBox" Grid.Column="1" Padding="6,2" />
+                            <TextBlock Grid.Row="1" Margin="0,8,0,0" VerticalAlignment="Center" Text="分析 Navicat 选中 SQL" />
+                            <TextBox x:Name="AnalyzeHotkeyTextBox" Grid.Row="1" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
+                            <TextBlock Grid.Row="2" Margin="0,8,0,0" VerticalAlignment="Center" Text="生成/切换 3 个续写候选" />
+                            <TextBox x:Name="CandidateHotkeyTextBox" Grid.Row="2" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
                         </Grid>
                     </StackPanel>
                 </ScrollViewer>

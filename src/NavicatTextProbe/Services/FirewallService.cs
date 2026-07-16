@@ -4,7 +4,7 @@ namespace NavicatTextProbe.Services;
 
 internal static class FirewallService
 {
-    private const string RuleName = "Navicat SQL Copilot Mobile";
+    private const string RuleName = "Assistant Mobile";
 
     public static async Task<bool> IsRuleEnabledAsync(int port, CancellationToken cancellationToken = default)
     {

@@ -45,10 +45,11 @@ internal sealed class SettingsService
         {
             if (File.Exists(SettingsPath))
             {
-                var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath));
+                var json = File.ReadAllText(SettingsPath);
+                var settings = JsonSerializer.Deserialize<AppSettings>(json);
                 if (settings is not null)
                 {
-                    EnsureDefaults(settings);
+                    EnsureDefaults(settings, ReadLegacyOverlayEnabled(json));
                     return settings;
                 }
             }
@@ -59,12 +60,12 @@ internal sealed class SettingsService
         }
 
         var defaults = new AppSettings();
-        EnsureDefaults(defaults);
+        EnsureDefaults(defaults, legacyOverlayEnabled: false);
         File.WriteAllText(SettingsPath, JsonSerializer.Serialize(defaults, _jsonOptions));
         return defaults;
     }
 
-    private static void EnsureDefaults(AppSettings settings)
+    private static void EnsureDefaults(AppSettings settings, bool legacyOverlayEnabled = false)
     {
         if (settings.SettingsVersion < 2)
         {
@@ -91,6 +92,18 @@ internal sealed class SettingsService
             settings.SettingsVersion = 2;
         }
 
+        if (settings.SettingsVersion < 3)
+        {
+            // Version 3 removes the floating overlay. Preserve an existing visible output by
+            // moving users who only enabled that overlay onto the taskbar panel.
+            if (legacyOverlayEnabled)
+            {
+                settings.TaskbarPanelEnabled = true;
+            }
+
+            settings.SettingsVersion = 3;
+        }
+
         settings.ApiBaseUrl = string.IsNullOrWhiteSpace(settings.ApiBaseUrl)
             ? "https://api.deepseek.com"
             : settings.ApiBaseUrl.TrimEnd('/');
@@ -100,12 +113,26 @@ internal sealed class SettingsService
         settings.MobilePort = Math.Clamp(settings.MobilePort, 1024, 65535);
         settings.PredictionDebounceMilliseconds = Math.Clamp(settings.PredictionDebounceMilliseconds, 150, 5000);
         settings.PredictionMinimumIntervalMilliseconds = Math.Clamp(settings.PredictionMinimumIntervalMilliseconds, 500, 5000);
-        ClampStyle(settings.OverlayStyle, 10, 48, 12, 72);
+        settings.TaskbarWidth = Math.Clamp(settings.TaskbarWidth, 200, 1400);
         ClampStyle(settings.TaskbarStyle, 10, 36, 12, 54);
         ClampStyle(settings.MobileStyle, 10, 48, 12, 72);
         if (string.IsNullOrWhiteSpace(settings.MobileAccessToken) || settings.MobileAccessToken.Length < 20)
         {
             settings.MobileAccessToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
+        }
+    }
+
+    private static bool ReadLegacyOverlayEnabled(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty("OverlayEnabled", out var value) &&
+                   value.ValueKind is JsonValueKind.True;
+        }
+        catch
+        {
+            return false;
         }
     }
 
