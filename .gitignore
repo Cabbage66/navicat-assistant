@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+dist/
+logs/*.jsonl
+logs/latest-log.txt
+logs/*.png
+config/settings.json
+config/settings.json.tmp

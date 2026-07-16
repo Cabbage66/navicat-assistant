@@ -1,0 +1,40 @@
+<Window x:Class="NavicatTextProbe.SuggestionOverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="SQL 建议"
+        Width="720"
+        SizeToContent="Height"
+        MinHeight="48"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        AllowsTransparency="True"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        Topmost="True"
+        Background="Transparent">
+    <Border x:Name="SuggestionBorder"
+            Padding="14,10"
+            CornerRadius="8"
+            BorderBrush="#708090"
+            BorderThickness="1"
+            MouseLeftButtonDown="SuggestionBorder_OnMouseLeftButtonDown">
+        <Border.ContextMenu>
+            <ContextMenu>
+                <MenuItem Header="打开设置" Click="OpenSettingsMenuItem_OnClick" />
+                <MenuItem Header="隐藏悬浮窗" Click="HideMenuItem_OnClick" />
+            </ContextMenu>
+        </Border.ContextMenu>
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="ModeText" Margin="0,0,10,0" VerticalAlignment="Center"
+                       FontWeight="SemiBold" Foreground="#58D68D" Text="AI" />
+            <TextBlock x:Name="SuggestionText" Grid.Column="1" VerticalAlignment="Center"
+                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                       FontFamily="Cascadia Mono, Consolas" Foreground="#F8F9F9"
+                       Text="等待 SQL 建议……" />
+        </Grid>
+    </Border>
+</Window>

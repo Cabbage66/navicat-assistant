@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NavicatTextProbe/NavicatTextProbe.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/NavicatTextProbe.SelfTests/NavicatTextProbe.SelfTests.csproj" />
+  </Folder>
+</Solution>

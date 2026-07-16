@@ -1,0 +1,50 @@
+namespace NavicatTextProbe.Models;
+
+public sealed record DisplayStyle
+{
+    public double FontSize { get; set; } = 16;
+    public double LineHeight { get; set; } = 24;
+    public string FontColor { get; set; } = "#F8F9F9";
+    public string BackgroundColor { get; set; } = "#17202A";
+    public double BackgroundOpacity { get; set; } = 0.82;
+}
+
+public sealed record AppSettings
+{
+    public int SettingsVersion { get; set; }
+    public bool AiEnabled { get; set; } = true;
+    public string ApiBaseUrl { get; set; } = "https://api.deepseek.com";
+    public string Model { get; set; } = "deepseek-v4-flash";
+    public string CustomGlobalPrompt { get; set; } = string.Empty;
+    public int PredictionDebounceMilliseconds { get; set; } = 850;
+    public int PredictionMinimumIntervalMilliseconds { get; set; } = 1400;
+    public bool OverlayEnabled { get; set; } = true;
+    public bool TaskbarPanelEnabled { get; set; }
+    public bool MobileServerEnabled { get; set; }
+    public bool KeyboardFallbackEnabled { get; set; }
+    public int MobilePort { get; set; } = 17832;
+    public string MobileAccessToken { get; set; } = string.Empty;
+    public string ToggleOverlayHotkey { get; set; } = "Ctrl+Alt+1";
+    public string ToggleTaskbarHotkey { get; set; } = "Ctrl+Alt+2";
+    public string ToggleMobileHotkey { get; set; } = "Ctrl+Alt+3";
+    public string CycleCandidatesHotkey { get; set; } = "Ctrl+Alt+R";
+    public string AnalyzeSelectionHotkey { get; set; } = "Ctrl+Alt+E";
+    public double? OverlayLeft { get; set; }
+    public double? OverlayTop { get; set; }
+    public DisplayStyle OverlayStyle { get; set; } = new();
+    public DisplayStyle TaskbarStyle { get; set; } = new()
+    {
+        FontSize = 11,
+        LineHeight = 15,
+        BackgroundColor = "#202020",
+        BackgroundOpacity = 0.96
+    };
+    public DisplayStyle MobileStyle { get; set; } = new()
+    {
+        FontSize = 18,
+        LineHeight = 28,
+        FontColor = "#7DF2B1",
+        BackgroundColor = "#151D27",
+        BackgroundOpacity = 0.96
+    };
+}

@@ -1,0 +1,167 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using NavicatTextProbe.Models;
+using NavicatTextProbe.Services;
+
+var failures = new List<string>();
+
+void Check(string name, bool condition)
+{
+    if (!condition) failures.Add(name);
+}
+
+var baseDocument = "SELECT * FR";
+var state = new SuggestionAcceptanceState(baseDocument, baseDocument.Length, "OM users;");
+ProbeResult Probe(string text, int caret) => new() { Text = text, CaretOffset = caret };
+
+Check("unchanged document remains stable", SuggestionAcceptanceMatcher.IsFollowing(state, Probe(baseDocument, baseDocument.Length)));
+Check("matching prefix remains stable", SuggestionAcceptanceMatcher.IsFollowing(state, Probe(baseDocument + "OM", baseDocument.Length + 2)));
+Check("case-insensitive SQL keyword prefix remains stable", SuggestionAcceptanceMatcher.IsFollowing(state, Probe(baseDocument + "om users", baseDocument.Length + 8)));
+Check("complete suggestion remains stable", SuggestionAcceptanceMatcher.IsFollowing(state, Probe(baseDocument + "OM users;", baseDocument.Length + 9)));
+Check("divergent input requests a new suggestion", !SuggestionAcceptanceMatcher.IsFollowing(state, Probe(baseDocument + "OX", baseDocument.Length + 2)));
+Check("moving the caret requests a new suggestion", !SuggestionAcceptanceMatcher.IsFollowing(state, Probe(baseDocument, 2)));
+
+var middleBase = "SELECT  WHERE active = 1";
+var middleState = new SuggestionAcceptanceState(middleBase, 7, "* FROM users");
+var middleCurrent = middleBase.Insert(7, "* FROM");
+Check("text after the caret is preserved", SuggestionAcceptanceMatcher.IsFollowing(middleState, Probe(middleCurrent, 13)));
+
+var newlineState = new SuggestionAcceptanceState("-- intent", 9, "\nSELECT 1;");
+Check("CRLF input matches LF suggestion", SuggestionAcceptanceMatcher.IsFollowing(newlineState, Probe("-- intent\r\nSELECT", 17)));
+
+var commentProbe = new ProbeResult
+{
+    Text = "-- 查询所有活跃用户\nSELECT ",
+    CaretOffset = "-- 查询所有活跃用户\nSELECT ".Length,
+    CaretLine = 2,
+    CaretColumn = 8
+};
+var completionPrompt = PromptTemplates.BuildCompletionPrompt(commentProbe);
+Check("line comment is labeled as an AI intent hint", completionPrompt.Contains("-- 查询所有活跃用户", StringComparison.Ordinal));
+
+var unfinishedBlock = new ProbeResult { Text = "/* 只查询今天的数据", CaretOffset = 11 };
+Check("unfinished block comment is retained", PromptTemplates.BuildCompletionPrompt(unfinishedBlock).Contains("只查询今天的数据", StringComparison.Ordinal));
+
+var diagnosisPrompt = PromptTemplates.BuildDiagnosisPrompt("SELECT", "SELECT");
+Check("diagnosis asks for every issue", diagnosisPrompt.Contains("所有能够确认", StringComparison.Ordinal));
+Check("diagnosis requests priority order", diagnosisPrompt.Contains("P0 → P1 → P2", StringComparison.Ordinal));
+
+var foreignKeyDocument = """
+    CREATE TABLE yangzhuoran_exam_addresses(
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      receiver_name VARCHAR(30) NOT NULL,
+      receiver_mobile VARCHAR(20) NOT NULL,
+      address_text VARCHAR(200) NOT NULL,
+      is_default INT UNSIGNED DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIME,
+      PRIMARY KEY (id),
+      CONSTRAINT fk_user_id 
+    """;
+var foreignKeyProbe = new ProbeResult
+{
+    Text = foreignKeyDocument,
+    CaretOffset = foreignKeyDocument.Length,
+    CaretLine = 10,
+    CaretColumn = 25,
+    ContentHash = "foreign-key-test"
+};
+var foreignKeyContext = SqlContextAnalyzer.Analyze(foreignKeyProbe);
+Check("fk constraint name enters foreign-key continuation state", foreignKeyContext.ExpectedKind == SqlExpectedContinuationKind.ForeignKeyConstraint);
+Check("fk column is inferred from an already defined column", foreignKeyContext.ForeignKeyColumn == "user_id");
+Check("defined is_default column is remembered", foreignKeyContext.DefinedColumns.Contains("is_default"));
+var immediateForeignKey = SqlContextAnalyzer.BuildImmediateGuardedSuggestion(foreignKeyProbe);
+Check("local guard immediately suggests FOREIGN KEY", immediateForeignKey?.InsertText.StartsWith("FOREIGN KEY (user_id) REFERENCES", StringComparison.Ordinal) == true);
+Check("repeated is_default suggestion is rejected", !SqlContextAnalyzer.IsCompatible(foreignKeyProbe, new SuggestionResult
+{
+    Mode = SuggestionMode.Completion,
+    InsertText = "is_default TINYINT NOT NULL DEFAULT 0,"
+}));
+
+var unrankedCandidates = new SuggestionResult
+{
+    Mode = SuggestionMode.Completion,
+    Candidates =
+    [
+        new SuggestionCandidate { Rank = 1, InsertText = "is_default TINYINT NOT NULL DEFAULT 0,", DisplayText = "is_default ...", Confidence = 0.99 },
+        new SuggestionCandidate { Rank = 2, InsertText = "FOREIGN KEY (user_id) REFERENCES yangzhuoran_exam_users (id)", DisplayText = "FOREIGN KEY ...", Confidence = 0.8 }
+    ]
+};
+var rankedCandidates = SqlContextAnalyzer.RankCandidates(foreignKeyProbe, unrankedCandidates);
+Check("foreign key candidate outranks repeated field", rankedCandidates.InsertText.StartsWith("FOREIGN KEY", StringComparison.OrdinalIgnoreCase));
+Check("foreign key context always has three fallback candidates", rankedCandidates.Candidates.Count == 3);
+Check("all strict foreign-key candidates stay syntax-compatible", rankedCandidates.Candidates.All(candidate => candidate.InsertText.Contains("FOREIGN KEY", StringComparison.OrdinalIgnoreCase)));
+Check("candidate cycling wraps locally", rankedCandidates.SelectCandidate(3).ActiveCandidateIndex == 0);
+
+var candidatePrompt = PromptTemplates.BuildCandidateContinuationPrompt(foreignKeyProbe);
+Check("candidate prompt requests exactly three choices", candidatePrompt.Contains("恰好 3", StringComparison.Ordinal));
+Check("candidate prompt carries inferred foreign-key state", candidatePrompt.Contains("ForeignKeyConstraint", StringComparison.Ordinal));
+Check("candidate prompt forbids repeating is_default", candidatePrompt.Contains("is_default", StringComparison.Ordinal));
+
+var longUnicodeText = new string('a', 4095) + "😀" + new string('中', 5000);
+var expectedHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(longUnicodeText)));
+Check("chunked content hash matches SHA256 for Unicode text", ContentHasher.Sha256(longUnicodeText) == expectedHash);
+
+var loggerTestDirectory = Path.Combine(Path.GetTempPath(), "NavicatTextProbe-SelfTests", Guid.NewGuid().ToString("N"));
+string loggerTestPath;
+using (var logger = new ProbeLogger(loggerTestDirectory))
+{
+    loggerTestPath = logger.LogPath;
+    logger.WriteSessionStarted();
+    logger.WriteState(new ProbeResult
+    {
+        Status = ProbeStatus.Captured,
+        Text = "state records must not repeat SQL"
+    });
+    logger.WriteCapture(new ProbeResult
+    {
+        Status = ProbeStatus.Captured,
+        Text = "SELECT 1;",
+        ContentHash = "logger-test",
+        Elements =
+        [
+            new ElementDiagnostic(0, "Edit", "TEEAutoCompleteMemo", "", "Win32",
+                "SELECT 1;\n" + new string('x', 500), [])
+        ]
+    });
+    for (var index = 0; index < 200; index++)
+    {
+        logger.WriteDiagnostic("bounded-queue-stress", index.ToString());
+    }
+}
+
+var loggerLines = File.ReadAllLines(loggerTestPath)
+    .Where(line => !string.IsNullOrWhiteSpace(line))
+    .Select(line => JsonDocument.Parse(line))
+    .ToArray();
+try
+{
+    Check("bounded background logger drains entries on dispose", loggerLines.Any(document => document.RootElement.GetProperty("eventType").GetString() == "session_ended"));
+    var stateData = loggerLines.First(document => document.RootElement.GetProperty("eventType").GetString() == "state").RootElement.GetProperty("data");
+    Check("state logs omit full SQL text", !stateData.TryGetProperty("Text", out _) && !stateData.TryGetProperty("text", out _));
+    var captureData = loggerLines.First(document => document.RootElement.GetProperty("eventType").GetString() == "capture").RootElement.GetProperty("data");
+    Check("debounced capture logs retain full SQL", captureData.GetProperty("Text").GetString() == "SELECT 1;");
+    Check("element diagnostics do not duplicate full editor text", captureData.GetProperty("Elements")[0].GetProperty("Name").GetString()!.Length < 240);
+}
+finally
+{
+    foreach (var document in loggerLines) document.Dispose();
+    Directory.Delete(loggerTestDirectory, recursive: true);
+}
+
+await using var mobileServer = new MobileServerService();
+var accessUrls = mobileServer.GetAccessUrls(new AppSettings { MobileAccessToken = "self-test-token", MobilePort = 17832 });
+Check("localhost is the first desktop URL", new Uri(accessUrls[0]).Host == "127.0.0.1");
+var preferredPhoneHost = accessUrls.Skip(1).Select(url => new Uri(url).Host).FirstOrDefault();
+Check("APIPA is never selected as the preferred phone URL", preferredPhoneHost is null || !preferredPhoneHost.StartsWith("169.254.", StringComparison.Ordinal));
+
+if (failures.Count == 0)
+{
+    Console.WriteLine($"Preferred phone host: {preferredPhoneHost ?? "none"}");
+    Console.WriteLine("All self-tests passed.");
+    return 0;
+}
+
+foreach (var failure in failures) Console.Error.WriteLine($"FAILED: {failure}");
+return 1;

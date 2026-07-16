@@ -1,0 +1,121 @@
+using System.Text.Json;
+using System.Windows;
+using NavicatTextProbe.Models;
+
+namespace NavicatTextProbe;
+
+public partial class SettingsWindow : Window
+{
+    private readonly AppSettings _workingCopy;
+
+    public SettingsWindow(AppSettings settings, bool hasSavedApiKey)
+    {
+        InitializeComponent();
+        _workingCopy = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(settings)) ?? new AppSettings();
+        ApiKeyStatusText.Text = hasSavedApiKey
+            ? "Windows 凭据管理器中已经保存了一个 API Key。"
+            : "尚未保存 API Key。请先撤销聊天中暴露的旧 Key，再在这里填写新 Key。";
+        PopulateControls();
+    }
+
+    public AppSettings? UpdatedSettings { get; private set; }
+
+    public string NewApiKey => ApiKeyPasswordBox.Password.Trim();
+
+    public bool ClearApiKey => ClearApiKeyCheckBox.IsChecked == true;
+
+    private void PopulateControls()
+    {
+        AiEnabledCheckBox.IsChecked = _workingCopy.AiEnabled;
+        ApiBaseUrlTextBox.Text = _workingCopy.ApiBaseUrl;
+        ModelTextBox.Text = _workingCopy.Model;
+        GlobalPromptTextBox.Text = _workingCopy.CustomGlobalPrompt;
+        DebounceTextBox.Text = _workingCopy.PredictionDebounceMilliseconds.ToString();
+        MinimumIntervalTextBox.Text = _workingCopy.PredictionMinimumIntervalMilliseconds.ToString();
+
+        OverlayEnabledCheckBox.IsChecked = _workingCopy.OverlayEnabled;
+        OverlayFontSizeTextBox.Text = _workingCopy.OverlayStyle.FontSize.ToString("0.##");
+        OverlayLineHeightTextBox.Text = _workingCopy.OverlayStyle.LineHeight.ToString("0.##");
+        OverlayOpacityTextBox.Text = _workingCopy.OverlayStyle.BackgroundOpacity.ToString("0.##");
+        OverlayBackgroundTextBox.Text = _workingCopy.OverlayStyle.BackgroundColor;
+        OverlayForegroundTextBox.Text = _workingCopy.OverlayStyle.FontColor;
+
+        TaskbarEnabledCheckBox.IsChecked = _workingCopy.TaskbarPanelEnabled;
+        TaskbarFontSizeTextBox.Text = _workingCopy.TaskbarStyle.FontSize.ToString("0.##");
+        TaskbarLineHeightTextBox.Text = _workingCopy.TaskbarStyle.LineHeight.ToString("0.##");
+        TaskbarOpacityTextBox.Text = _workingCopy.TaskbarStyle.BackgroundOpacity.ToString("0.##");
+        TaskbarBackgroundTextBox.Text = _workingCopy.TaskbarStyle.BackgroundColor;
+        TaskbarForegroundTextBox.Text = _workingCopy.TaskbarStyle.FontColor;
+
+        MobileEnabledCheckBox.IsChecked = _workingCopy.MobileServerEnabled;
+        MobilePortTextBox.Text = _workingCopy.MobilePort.ToString();
+        MobileTokenTextBox.Text = _workingCopy.MobileAccessToken;
+        MobileFontSizeTextBox.Text = _workingCopy.MobileStyle.FontSize.ToString("0.##");
+        MobileLineHeightTextBox.Text = _workingCopy.MobileStyle.LineHeight.ToString("0.##");
+        MobileOpacityTextBox.Text = _workingCopy.MobileStyle.BackgroundOpacity.ToString("0.##");
+        MobileBackgroundTextBox.Text = _workingCopy.MobileStyle.BackgroundColor;
+        MobileForegroundTextBox.Text = _workingCopy.MobileStyle.FontColor;
+        KeyboardFallbackCheckBox.IsChecked = _workingCopy.KeyboardFallbackEnabled;
+        OverlayHotkeyTextBox.Text = _workingCopy.ToggleOverlayHotkey;
+        TaskbarHotkeyTextBox.Text = _workingCopy.ToggleTaskbarHotkey;
+        MobileHotkeyTextBox.Text = _workingCopy.ToggleMobileHotkey;
+        AnalyzeHotkeyTextBox.Text = _workingCopy.AnalyzeSelectionHotkey;
+        CandidateHotkeyTextBox.Text = _workingCopy.CycleCandidatesHotkey;
+    }
+
+    private void SaveButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (!int.TryParse(DebounceTextBox.Text, out var debounce) ||
+            !int.TryParse(MinimumIntervalTextBox.Text, out var minimumInterval) ||
+            !int.TryParse(MobilePortTextBox.Text, out var port) ||
+            !double.TryParse(OverlayFontSizeTextBox.Text, out var overlayFontSize) ||
+            !double.TryParse(OverlayLineHeightTextBox.Text, out var overlayLineHeight) ||
+            !double.TryParse(OverlayOpacityTextBox.Text, out var overlayOpacity) ||
+            !double.TryParse(TaskbarFontSizeTextBox.Text, out var taskbarFontSize) ||
+            !double.TryParse(TaskbarLineHeightTextBox.Text, out var taskbarLineHeight) ||
+            !double.TryParse(TaskbarOpacityTextBox.Text, out var taskbarOpacity) ||
+            !double.TryParse(MobileFontSizeTextBox.Text, out var mobileFontSize) ||
+            !double.TryParse(MobileLineHeightTextBox.Text, out var mobileLineHeight) ||
+            !double.TryParse(MobileOpacityTextBox.Text, out var mobileOpacity))
+        {
+            System.Windows.MessageBox.Show(this, "字号、行高、透明度、端口和等待时间必须填写有效数字。", "设置无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        _workingCopy.AiEnabled = AiEnabledCheckBox.IsChecked == true;
+        _workingCopy.ApiBaseUrl = ApiBaseUrlTextBox.Text.Trim();
+        _workingCopy.Model = ModelTextBox.Text.Trim();
+        _workingCopy.CustomGlobalPrompt = GlobalPromptTextBox.Text;
+        _workingCopy.PredictionDebounceMilliseconds = debounce;
+        _workingCopy.PredictionMinimumIntervalMilliseconds = minimumInterval;
+        _workingCopy.OverlayEnabled = OverlayEnabledCheckBox.IsChecked == true;
+        _workingCopy.OverlayStyle.FontSize = overlayFontSize;
+        _workingCopy.OverlayStyle.LineHeight = overlayLineHeight;
+        _workingCopy.OverlayStyle.BackgroundOpacity = overlayOpacity;
+        _workingCopy.OverlayStyle.BackgroundColor = OverlayBackgroundTextBox.Text.Trim();
+        _workingCopy.OverlayStyle.FontColor = OverlayForegroundTextBox.Text.Trim();
+        _workingCopy.TaskbarPanelEnabled = TaskbarEnabledCheckBox.IsChecked == true;
+        _workingCopy.TaskbarStyle.FontSize = taskbarFontSize;
+        _workingCopy.TaskbarStyle.LineHeight = taskbarLineHeight;
+        _workingCopy.TaskbarStyle.BackgroundOpacity = taskbarOpacity;
+        _workingCopy.TaskbarStyle.BackgroundColor = TaskbarBackgroundTextBox.Text.Trim();
+        _workingCopy.TaskbarStyle.FontColor = TaskbarForegroundTextBox.Text.Trim();
+        _workingCopy.MobileServerEnabled = MobileEnabledCheckBox.IsChecked == true;
+        _workingCopy.MobilePort = port;
+        _workingCopy.MobileAccessToken = MobileTokenTextBox.Text.Trim();
+        _workingCopy.MobileStyle.FontSize = mobileFontSize;
+        _workingCopy.MobileStyle.LineHeight = mobileLineHeight;
+        _workingCopy.MobileStyle.BackgroundOpacity = mobileOpacity;
+        _workingCopy.MobileStyle.BackgroundColor = MobileBackgroundTextBox.Text.Trim();
+        _workingCopy.MobileStyle.FontColor = MobileForegroundTextBox.Text.Trim();
+        _workingCopy.KeyboardFallbackEnabled = KeyboardFallbackCheckBox.IsChecked == true;
+        _workingCopy.ToggleOverlayHotkey = OverlayHotkeyTextBox.Text.Trim();
+        _workingCopy.ToggleTaskbarHotkey = TaskbarHotkeyTextBox.Text.Trim();
+        _workingCopy.ToggleMobileHotkey = MobileHotkeyTextBox.Text.Trim();
+        _workingCopy.AnalyzeSelectionHotkey = AnalyzeHotkeyTextBox.Text.Trim();
+        _workingCopy.CycleCandidatesHotkey = CandidateHotkeyTextBox.Text.Trim();
+
+        UpdatedSettings = _workingCopy;
+        DialogResult = true;
+    }
+}

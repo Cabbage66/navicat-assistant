@@ -1,0 +1,464 @@
+using System.IO;
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
+using NavicatTextProbe.Models;
+
+namespace NavicatTextProbe.Services;
+
+internal sealed class MobileServerService : IAsyncDisposable
+{
+    private readonly object _stateLock = new();
+    private static readonly JsonSerializerOptions WebJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
+    };
+    private TcpListener? _listener;
+    private readonly ConcurrentDictionary<int, Task> _clientTasks = new();
+    private int _nextClientTaskId;
+    private CancellationTokenSource? _serverCancellation;
+    private Task? _serverLoop;
+    private SuggestionResult _suggestion = SuggestionResult.Info("等待 Navicat SQL…");
+    private AppSettings _settings = new();
+
+    public bool IsRunning => _listener is not null;
+
+    public int Port { get; private set; }
+
+    public string? LastError { get; private set; }
+
+    public event EventHandler<MobileSettingsPatch>? SettingsChanged;
+
+    public async Task<bool> StartAsync(AppSettings settings, CancellationToken cancellationToken = default)
+    {
+        if (_listener is not null && Port == settings.MobilePort)
+        {
+            lock (_stateLock)
+            {
+                _settings = settings;
+            }
+
+            return true;
+        }
+
+        await StopAsync();
+        LastError = null;
+        Port = settings.MobilePort;
+        lock (_stateLock)
+        {
+            _settings = settings;
+        }
+
+        try
+        {
+            _listener = new TcpListener(IPAddress.Any, settings.MobilePort);
+            _listener.Start();
+            _serverCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _serverLoop = AcceptLoopAsync(_listener, _serverCancellation.Token);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.ToString();
+            _listener = null;
+            return false;
+        }
+    }
+
+    public void UpdateSuggestion(SuggestionResult suggestion, AppSettings settings)
+    {
+        lock (_stateLock)
+        {
+            _suggestion = suggestion;
+            _settings = settings;
+        }
+    }
+
+    public IReadOnlyList<string> GetAccessUrls(AppSettings settings)
+    {
+        var token = WebUtility.UrlEncode(settings.MobileAccessToken);
+        var candidates = new List<(int Score, IPAddress Address)>();
+
+        foreach (var adapter in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (adapter.OperationalStatus != OperationalStatus.Up ||
+                adapter.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+            {
+                continue;
+            }
+
+            var properties = adapter.GetIPProperties();
+            var hasGateway = properties.GatewayAddresses.Any(gateway =>
+                gateway.Address.AddressFamily == AddressFamily.InterNetwork &&
+                !gateway.Address.Equals(IPAddress.Any));
+            var adapterText = $"{adapter.Name} {adapter.Description}";
+            var likelyVirtual = IsLikelyVirtualAdapter(adapterText);
+            var physicalType = adapter.NetworkInterfaceType is
+                NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.Ethernet or NetworkInterfaceType.GigabitEthernet;
+
+            foreach (var address in properties.UnicastAddresses)
+            {
+                if (address.Address.AddressFamily == AddressFamily.InterNetwork &&
+                    !IPAddress.IsLoopback(address.Address) &&
+                    !IsAutomaticPrivateAddress(address.Address))
+                {
+                    var score = 0;
+                    if (physicalType) score += 100;
+                    if (hasGateway) score += 80;
+                    if (IsPrivateLanAddress(address.Address)) score += 40;
+                    if (likelyVirtual) score -= 200;
+                    candidates.Add((score, address.Address));
+                }
+            }
+        }
+
+        var urls = new List<string>
+        {
+            $"http://127.0.0.1:{settings.MobilePort}/?token={token}"
+        };
+        urls.AddRange(candidates
+            .OrderByDescending(candidate => candidate.Score)
+            .ThenBy(candidate => candidate.Address.ToString(), StringComparer.Ordinal)
+            .Select(candidate => $"http://{candidate.Address}:{settings.MobilePort}/?token={token}")
+            .Distinct(StringComparer.OrdinalIgnoreCase));
+        return urls;
+    }
+
+    private static bool IsLikelyVirtualAdapter(string text)
+    {
+        string[] markers = ["tailscale", "wintun", "tunnel", "mihomo", "meta", "vgate", "hyper-v", "virtual", "vmware", "wsl", "bluetooth"];
+        return markers.Any(marker => text.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsAutomaticPrivateAddress(IPAddress address)
+    {
+        var bytes = address.GetAddressBytes();
+        return bytes.Length == 4 && bytes[0] == 169 && bytes[1] == 254;
+    }
+
+    private static bool IsPrivateLanAddress(IPAddress address)
+    {
+        var bytes = address.GetAddressBytes();
+        return bytes.Length == 4 &&
+               (bytes[0] == 10 ||
+                (bytes[0] == 172 && bytes[1] is >= 16 and <= 31) ||
+                (bytes[0] == 192 && bytes[1] == 168));
+    }
+
+    private async Task AcceptLoopAsync(TcpListener listener, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var client = await listener.AcceptTcpClientAsync(cancellationToken);
+                var taskId = Interlocked.Increment(ref _nextClientTaskId);
+                var clientTask = HandleClientAsync(client, cancellationToken);
+                _clientTasks[taskId] = clientTask;
+                _ = clientTask.ContinueWith(completed =>
+                {
+                    _ = completed.Exception;
+                    _clientTasks.TryRemove(taskId, out _);
+                }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (ObjectDisposedException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.ToString();
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    await Task.Delay(150, cancellationToken);
+                }
+            }
+        }
+    }
+
+    private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
+    {
+        using (client)
+        {
+            try
+            {
+                client.ReceiveTimeout = 5000;
+                client.SendTimeout = 5000;
+                await using var stream = client.GetStream();
+                using var reader = new StreamReader(stream, Encoding.UTF8, false, 4096, leaveOpen: true);
+                var requestLine = await reader.ReadLineAsync(cancellationToken);
+                if (string.IsNullOrWhiteSpace(requestLine))
+                {
+                    return;
+                }
+
+                var requestParts = requestLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (requestParts.Length < 2)
+                {
+                    await WriteResponseAsync(stream, 400, "text/plain; charset=utf-8", "请求格式不正确", cancellationToken);
+                    return;
+                }
+
+                var contentLength = 0;
+                while (true)
+                {
+                    var header = await reader.ReadLineAsync(cancellationToken);
+                    if (string.IsNullOrEmpty(header)) break;
+                    if (header.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _ = int.TryParse(header["Content-Length:".Length..].Trim(), out contentLength);
+                    }
+                }
+
+                var body = string.Empty;
+                if (contentLength > 0)
+                {
+                    var buffer = new char[Math.Min(contentLength, 64_000)];
+                    var total = 0;
+                    while (total < buffer.Length)
+                    {
+                        var count = await reader.ReadAsync(buffer.AsMemory(total, buffer.Length - total), cancellationToken);
+                        if (count == 0) break;
+                        total += count;
+                    }
+
+                    body = new string(buffer, 0, total);
+                }
+
+                var method = requestParts[0].ToUpperInvariant();
+                var uri = new Uri("http://localhost" + requestParts[1]);
+                var token = ReadQueryValue(uri.Query, "token");
+                if (!IsAuthorized(token))
+                {
+                    await WriteResponseAsync(stream, 401, "text/plain; charset=utf-8", "访问令牌不正确。请从电脑端复制完整手机地址。", cancellationToken);
+                    return;
+                }
+
+                if (method == "GET" && uri.AbsolutePath == "/")
+                {
+                    await WriteResponseAsync(stream, 200, "text/html; charset=utf-8", BuildPage(), cancellationToken);
+                    return;
+                }
+
+                if (method == "GET" && uri.AbsolutePath == "/api/state")
+                {
+                    string json;
+                    lock (_stateLock)
+                    {
+                        json = JsonSerializer.Serialize(new
+                        {
+                            suggestion = _suggestion,
+                            settings = new
+                            {
+                                _settings.OverlayEnabled,
+                                _settings.TaskbarPanelEnabled,
+                                _settings.MobileServerEnabled,
+                                overlayStyle = _settings.OverlayStyle,
+                                taskbarStyle = _settings.TaskbarStyle,
+                                mobileStyle = _settings.MobileStyle
+                            }
+                        }, WebJsonOptions);
+                    }
+
+                    await WriteResponseAsync(stream, 200, "application/json; charset=utf-8", json, cancellationToken);
+                    return;
+                }
+
+                if (method == "POST" && uri.AbsolutePath == "/api/settings")
+                {
+                    var patch = JsonSerializer.Deserialize<MobileSettingsPatch>(body, WebJsonOptions);
+                    if (patch is null)
+                    {
+                        await WriteResponseAsync(stream, 400, "text/plain; charset=utf-8", "设置内容为空", cancellationToken);
+                        return;
+                    }
+
+                    SettingsChanged?.Invoke(this, patch);
+                    await WriteResponseAsync(stream, 200, "application/json; charset=utf-8", "{\"saved\":true}", cancellationToken);
+                    return;
+                }
+
+                await WriteResponseAsync(stream, 404, "text/plain; charset=utf-8", "Not Found", cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                LastError = ex.ToString();
+            }
+        }
+    }
+
+    private bool IsAuthorized(string? requestToken)
+    {
+        string token;
+        lock (_stateLock)
+        {
+            token = _settings.MobileAccessToken;
+        }
+
+        return !string.IsNullOrWhiteSpace(token) && string.Equals(requestToken, token, StringComparison.Ordinal);
+    }
+
+    private static string? ReadQueryValue(string query, string key)
+    {
+        foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var pair = part.Split('=', 2);
+            if (pair.Length > 0 && string.Equals(WebUtility.UrlDecode(pair[0]), key, StringComparison.Ordinal))
+            {
+                return pair.Length == 2 ? WebUtility.UrlDecode(pair[1]) : string.Empty;
+            }
+        }
+
+        return null;
+    }
+
+    private static async Task WriteResponseAsync(
+        NetworkStream stream,
+        int statusCode,
+        string contentType,
+        string content,
+        CancellationToken cancellationToken)
+    {
+        var body = Encoding.UTF8.GetBytes(content);
+        var reason = statusCode switch
+        {
+            200 => "OK",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            404 => "Not Found",
+            _ => "Error"
+        };
+        var header = Encoding.ASCII.GetBytes(
+            $"HTTP/1.1 {statusCode} {reason}\r\nContent-Type: {contentType}\r\nContent-Length: {body.Length}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n");
+        await stream.WriteAsync(header, cancellationToken);
+        await stream.WriteAsync(body, cancellationToken);
+        await stream.FlushAsync(cancellationToken);
+    }
+
+    public async Task StopAsync()
+    {
+        if (_listener is null)
+        {
+            return;
+        }
+
+        var listener = _listener;
+        var cancellation = _serverCancellation;
+        var loop = _serverLoop;
+        _listener = null;
+        _serverCancellation = null;
+        _serverLoop = null;
+        cancellation?.Cancel();
+        listener.Stop();
+        try
+        {
+            if (loop is not null)
+            {
+                await loop.WaitAsync(TimeSpan.FromSeconds(2));
+            }
+
+            var clients = _clientTasks.Values.ToArray();
+            if (clients.Length > 0)
+            {
+                await Task.WhenAll(clients).WaitAsync(TimeSpan.FromSeconds(2));
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or TimeoutException or ObjectDisposedException)
+        {
+            // Stopping the listener interrupts AcceptTcpClientAsync by design.
+        }
+        cancellation?.Dispose();
+    }
+
+    public async ValueTask DisposeAsync() => await StopAsync();
+
+    private static string BuildPage() => """
+        <!doctype html>
+        <html lang="zh-CN">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+          <title>Navicat SQL Copilot</title>
+          <style>
+            :root{color-scheme:dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#0c1117;color:#f2f5f7}
+            body{margin:0;padding:18px;max-width:920px;margin:auto}.card{background:#151d27;border:1px solid #293746;border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 8px 28px #0005}
+            .badge{display:inline-block;padding:3px 9px;border-radius:99px;background:#1e6f50;color:#c9ffe8;font-size:12px}h1{font-size:21px;margin:4px 0 16px}h2{font-size:15px;color:#9fb1c3;margin:0 0 9px}
+            #display{font:600 18px/1.55 ui-monospace,Consolas,monospace;color:#7df2b1;white-space:pre-wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0d131a;padding:12px;border-radius:9px;color:#dce7ef}
+            #explanation,#issues{line-height:1.65;color:#c7d2dc}#candidates{padding-left:22px;line-height:1.5}#candidates li{padding:7px 9px;margin:6px 0;border-left:3px solid #405365;background:#0d131a;border-radius:5px;font-family:ui-monospace,Consolas,monospace}#candidates li.active{border-color:#58d68d;color:#9af5c2}.grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}.field{display:flex;flex-direction:column;gap:5px}label{font-size:13px;color:#aab8c5}input{background:#0d131a;color:#fff;border:1px solid #3a4d60;border-radius:7px;padding:9px}button{background:#2b8a62;color:white;border:0;border-radius:8px;padding:11px 15px;font-weight:650}.muted{color:#7f91a3;font-size:12px}
+            @media(max-width:600px){.grid{grid-template-columns:1fr}body{padding:11px}.card{padding:13px}}
+          </style>
+        </head>
+        <body>
+          <h1>Navicat SQL Copilot <span id="mode" class="badge">等待</span></h1>
+          <section class="card"><h2>当前最有用的建议</h2><div id="display">等待 Navicat SQL…</div></section>
+          <section class="card"><h2>完整建议代码</h2><pre id="insert">—</pre><div id="candidateBlock" hidden><h2>本次 3 个候选（电脑按 Ctrl+Alt+R 切换）</h2><ol id="candidates"></ol></div><h2>为什么</h2><div id="explanation">—</div><ul id="issues"></ul></section>
+          <details class="card"><summary>展示配置</summary><p class="muted">保存后会同步到电脑上的悬浮窗与任务栏内双行建议。</p>
+            <div class="grid">
+              <label><input id="overlayEnabled" type="checkbox"> 开启透明悬浮窗</label><label><input id="taskbarPanelEnabled" type="checkbox"> 开启任务栏内建议</label>
+              <div class="field"><label>悬浮窗字号</label><input id="overlayFont" type="number" min="10" max="48" step="1"></div>
+              <div class="field"><label>悬浮窗行高</label><input id="overlayLine" type="number" min="12" max="72" step="1"></div>
+              <div class="field"><label>悬浮窗背景色</label><input id="overlayBg" type="color"></div>
+              <div class="field"><label>悬浮窗字体色</label><input id="overlayFg" type="color"></div>
+              <div class="field"><label>悬浮窗透明度</label><input id="overlayOpacity" type="number" min="0.05" max="1" step="0.05"></div>
+              <div class="field"><label>任务栏字号</label><input id="taskbarFont" type="number" min="10" max="36" step="1"></div>
+              <div class="field"><label>任务栏行高</label><input id="taskbarLine" type="number" min="12" max="54" step="1"></div>
+              <div class="field"><label>任务栏背景色</label><input id="taskbarBg" type="color"></div>
+              <div class="field"><label>任务栏字体色</label><input id="taskbarFg" type="color"></div>
+              <div class="field"><label>任务栏透明度</label><input id="taskbarOpacity" type="number" min="0.05" max="1" step="0.05"></div>
+              <div class="field"><label>手机建议字号</label><input id="mobileFont" type="number" min="10" max="48" step="1"></div>
+              <div class="field"><label>手机建议行高</label><input id="mobileLine" type="number" min="12" max="72" step="1"></div>
+              <div class="field"><label>手机卡片背景色</label><input id="mobileBg" type="color"></div>
+              <div class="field"><label>手机建议字体色</label><input id="mobileFg" type="color"></div>
+              <div class="field"><label>手机卡片透明度</label><input id="mobileOpacity" type="number" min="0.05" max="1" step="0.05"></div>
+            </div><p><button id="save">保存并同步</button> <span id="saved" class="muted"></span></p>
+          </details>
+          <script>
+            const token=new URLSearchParams(location.search).get('token')||'';let populated=false;
+            const $=id=>document.getElementById(id); const api=p=>p+'?token='+encodeURIComponent(token);
+            async function refresh(){try{const r=await fetch(api('/api/state'));if(!r.ok)throw Error(r.status);const x=await r.json(),s=x.suggestion||{},c=x.settings||{};
+              const cs=s.candidates||[],active=s.activeCandidateIndex||0;$('mode').textContent=cs.length?`候选 ${active+1}/${cs.length}`:(['补全','诊断','状态','错误'][s.mode]||'建议');$('display').textContent=s.displayText||'当前没有足够可靠的建议';$('insert').textContent=s.insertText||'—';$('explanation').textContent=s.explanation||'—';
+              $('candidateBlock').hidden=!cs.length;$('candidates').replaceChildren(...cs.map((c,i)=>{const li=document.createElement('li');li.textContent=`${i+1}. ${c.displayText||c.insertText||'—'}`;if(i===active)li.className='active';return li}));
+              $('issues').replaceChildren(...(s.issues||[]).map(i=>{const li=document.createElement('li');li.textContent=i;return li}));
+              const m=c.mobileStyle||{};$('display').style.fontSize=(m.fontSize||18)+'px';$('display').style.lineHeight=(m.lineHeight||28)+'px';$('display').style.color=m.fontColor||'#7df2b1';
+              const rgba=(hex,a)=>{const v=(hex||'#151d27').replace('#','');const n=parseInt(v.length===3?v.split('').map(x=>x+x).join(''):v,16);return `rgba(${n>>16},${n>>8&255},${n&255},${a??.96})`};document.querySelectorAll('.card').forEach(x=>x.style.backgroundColor=rgba(m.backgroundColor,m.backgroundOpacity));
+              if(!populated){populated=true;$('overlayEnabled').checked=!!c.overlayEnabled;$('taskbarPanelEnabled').checked=!!c.taskbarPanelEnabled;const o=c.overlayStyle||{},t=c.taskbarStyle||{};
+                $('overlayFont').value=o.fontSize||16;$('overlayLine').value=o.lineHeight||24;$('overlayBg').value=o.backgroundColor||'#17202a';$('overlayFg').value=o.fontColor||'#f8f9f9';$('overlayOpacity').value=o.backgroundOpacity||.82;
+                $('taskbarFont').value=t.fontSize||14;$('taskbarLine').value=t.lineHeight||21;$('taskbarBg').value=t.backgroundColor||'#17202a';$('taskbarFg').value=t.fontColor||'#f8f9f9';$('taskbarOpacity').value=t.backgroundOpacity||.92;
+                $('mobileFont').value=m.fontSize||18;$('mobileLine').value=m.lineHeight||28;$('mobileBg').value=m.backgroundColor||'#151d27';$('mobileFg').value=m.fontColor||'#7df2b1';$('mobileOpacity').value=m.backgroundOpacity||.96;}}
+              catch(e){$('display').textContent='无法连接电脑端：'+e.message}}
+            $('save').onclick=async()=>{const body={overlayEnabled:$('overlayEnabled').checked,taskbarPanelEnabled:$('taskbarPanelEnabled').checked,overlayFontSize:+$('overlayFont').value,overlayLineHeight:+$('overlayLine').value,overlayBackgroundColor:$('overlayBg').value,overlayFontColor:$('overlayFg').value,overlayOpacity:+$('overlayOpacity').value,taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
+              const r=await fetch(api('/api/settings'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('saved').textContent=r.ok?'已保存':'保存失败';setTimeout(()=>$('saved').textContent='',1800)};
+            refresh();setInterval(refresh,1200);
+          </script>
+        </body></html>
+        """;
+}
+
+internal sealed record MobileSettingsPatch
+{
+    public bool? OverlayEnabled { get; init; }
+    public bool? TaskbarPanelEnabled { get; init; }
+    public double? OverlayFontSize { get; init; }
+    public double? OverlayLineHeight { get; init; }
+    public string? OverlayBackgroundColor { get; init; }
+    public string? OverlayFontColor { get; init; }
+    public double? OverlayOpacity { get; init; }
+    public double? TaskbarFontSize { get; init; }
+    public double? TaskbarLineHeight { get; init; }
+    public string? TaskbarBackgroundColor { get; init; }
+    public string? TaskbarFontColor { get; init; }
+    public double? TaskbarOpacity { get; init; }
+    public double? MobileFontSize { get; init; }
+    public double? MobileLineHeight { get; init; }
+    public string? MobileBackgroundColor { get; init; }
+    public string? MobileFontColor { get; init; }
+    public double? MobileOpacity { get; init; }
+}
