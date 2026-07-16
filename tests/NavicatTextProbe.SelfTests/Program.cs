@@ -87,6 +87,34 @@ Check("repeated is_default suggestion is rejected", !SqlContextAnalyzer.IsCompat
     InsertText = "is_default TINYINT NOT NULL DEFAULT 0,"
 }));
 
+var missingCreateTableParenthesisDocument = """
+    CREATE TABLE yangzhuoran_exam_
+      id BIGINT UNSIGNED AUTO_INCREMENT NOT NULL,
+    )
+    """;
+var missingCreateTableParenthesisCaret = missingCreateTableParenthesisDocument.IndexOf('\n');
+var missingCreateTableParenthesisProbe = new ProbeResult
+{
+    Text = missingCreateTableParenthesisDocument,
+    CaretOffset = missingCreateTableParenthesisCaret,
+    CaretLine = 1,
+    CaretColumn = 31
+};
+var missingCreateTableParenthesisContext = SqlContextAnalyzer.Analyze(missingCreateTableParenthesisProbe);
+var immediateCreateTableParenthesis = SqlContextAnalyzer.BuildImmediateGuardedSuggestion(missingCreateTableParenthesisProbe);
+Check("caret after CREATE TABLE name detects the missing opening parenthesis",
+    missingCreateTableParenthesisContext.ExpectedKind == SqlExpectedContinuationKind.CreateTableOpeningParenthesis);
+Check("missing CREATE TABLE parenthesis is shown clearly but inserts only SQL",
+    immediateCreateTableParenthesis?.DisplayText.Contains("缺少英文左括号", StringComparison.Ordinal) == true &&
+    immediateCreateTableParenthesis.InsertText == "(");
+Check("opening-parenthesis guard accepts only a parenthesis continuation",
+    SqlContextAnalyzer.IsCompatible(missingCreateTableParenthesisProbe, immediateCreateTableParenthesis!) &&
+    !SqlContextAnalyzer.IsCompatible(missingCreateTableParenthesisProbe, new SuggestionResult
+    {
+        Mode = SuggestionMode.Completion,
+        InsertText = "id BIGINT"
+    }));
+
 var unrankedCandidates = new SuggestionResult
 {
     Mode = SuggestionMode.Completion,

@@ -276,15 +276,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!_settingsService.Current.AiEnabled ||
-            string.IsNullOrWhiteSpace(probe.Text))
+        if (string.IsNullOrWhiteSpace(probe.Text))
         {
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(_apiKey))
-        {
-            UpdateSuggestion(SuggestionResult.Info("未配置 DeepSeek API Key；全文探测仍在正常工作"));
             return;
         }
 
@@ -312,6 +305,20 @@ public partial class MainWindow : Window
             RememberSuggestionForAcceptance(probe, immediateGuard);
             UpdateSuggestion(immediateGuard);
             immediateGuardApplied = true;
+        }
+
+        if (!_settingsService.Current.AiEnabled)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_apiKey))
+        {
+            if (!immediateGuardApplied)
+            {
+                UpdateSuggestion(SuggestionResult.Info("未配置 DeepSeek API Key；全文探测仍在正常工作"));
+            }
+            return;
         }
 
         if (!immediateGuardApplied && IsFollowingCurrentSuggestion(probe))

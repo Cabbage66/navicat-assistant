@@ -6,6 +6,7 @@ namespace NavicatTextProbe.Services;
 internal enum SqlExpectedContinuationKind
 {
     Unknown,
+    CreateTableOpeningParenthesis,
     CreateTableElement,
     ConstraintType,
     ForeignKeyConstraint,
@@ -55,6 +56,10 @@ internal static class SqlContextAnalyzer
         @"\bCONSTRAINT\s+(?<name>`[^`]+`|[A-Za-z_][\w$]*)\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    private static readonly Regex CreateTableHeaderAtCaretRegex = new(
+        @"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:`[^`]+`|[A-Za-z_][\w$]*)\s*\.\s*)?(?:`[^`]+`|[A-Za-z_][\w$]*)\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     public static SqlCaretContext Analyze(ProbeResult probe)
     {
         var caret = Math.Clamp(probe.CaretOffset ?? probe.Text.Length, 0, probe.Text.Length);
@@ -84,33 +89,41 @@ internal static class SqlContextAnalyzer
         string? constraintName = null;
         string? foreignKeyColumn = null;
 
-        var constraintMatch = ConstraintAtCaretRegex.Match(currentLine);
-        if (constraintMatch.Success)
+        if (currentTable is not null && CreateTableHeaderAtCaretRegex.IsMatch(currentLine))
         {
-            constraintName = Unquote(constraintMatch.Groups["name"].Value);
-            foreignKeyColumn = InferForeignKeyColumn(constraintName, columns);
-            if (constraintName.StartsWith("fk_", StringComparison.OrdinalIgnoreCase))
-            {
-                expectedKind = SqlExpectedContinuationKind.ForeignKeyConstraint;
-                expected = foreignKeyColumn is null
-                    ? "约束名以 fk_ 开头；必须优先续写 FOREIGN KEY，不得重新定义字段"
-                    : $"正在命名外键；必须优先续写 FOREIGN KEY ({foreignKeyColumn}) REFERENCES ...，不得重新定义字段";
-            }
-            else
-            {
-                expectedKind = SqlExpectedContinuationKind.ConstraintType;
-                expected = "约束名之后必须续写 FOREIGN KEY、UNIQUE、CHECK 或 PRIMARY KEY 等约束类型";
-            }
+            expectedKind = SqlExpectedContinuationKind.CreateTableOpeningParenthesis;
+            expected = "CREATE TABLE 表名后缺少英文左括号 (；先开始字段列表，不得跳到字段或约束";
         }
-        else if (Regex.IsMatch(currentLine, @"\bFOREIGN\s+KEY\s*\([^)]*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        else
         {
-            expectedKind = SqlExpectedContinuationKind.ForeignKeyColumns;
-            expected = "补完 FOREIGN KEY 的本表列和右括号，然后写 REFERENCES";
-        }
-        else if (Regex.IsMatch(currentLine, @"\bREFERENCES\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
-        {
-            expectedKind = SqlExpectedContinuationKind.ReferencedTable;
-            expected = "填写文档中真实存在的父表及被引用列，不得虚构对象";
+            var constraintMatch = ConstraintAtCaretRegex.Match(currentLine);
+            if (constraintMatch.Success)
+            {
+                constraintName = Unquote(constraintMatch.Groups["name"].Value);
+                foreignKeyColumn = InferForeignKeyColumn(constraintName, columns);
+                if (constraintName.StartsWith("fk_", StringComparison.OrdinalIgnoreCase))
+                {
+                    expectedKind = SqlExpectedContinuationKind.ForeignKeyConstraint;
+                    expected = foreignKeyColumn is null
+                        ? "约束名以 fk_ 开头；必须优先续写 FOREIGN KEY，不得重新定义字段"
+                        : $"正在命名外键；必须优先续写 FOREIGN KEY ({foreignKeyColumn}) REFERENCES ...，不得重新定义字段";
+                }
+                else
+                {
+                    expectedKind = SqlExpectedContinuationKind.ConstraintType;
+                    expected = "约束名之后必须续写 FOREIGN KEY、UNIQUE、CHECK 或 PRIMARY KEY 等约束类型";
+                }
+            }
+            else if (Regex.IsMatch(currentLine, @"\bFOREIGN\s+KEY\s*\([^)]*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            {
+                expectedKind = SqlExpectedContinuationKind.ForeignKeyColumns;
+                expected = "补完 FOREIGN KEY 的本表列和右括号，然后写 REFERENCES";
+            }
+            else if (Regex.IsMatch(currentLine, @"\bREFERENCES\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            {
+                expectedKind = SqlExpectedContinuationKind.ReferencedTable;
+                expected = "填写文档中真实存在的父表及被引用列，不得虚构对象";
+            }
         }
 
         var (parentTable, foundInDocument) = InferParentTable(currentTable, foreignKeyColumn, knownTables);
@@ -133,6 +146,18 @@ internal static class SqlContextAnalyzer
     public static SuggestionResult? BuildImmediateGuardedSuggestion(ProbeResult probe)
     {
         var context = Analyze(probe);
+        if (context.ExpectedKind == SqlExpectedContinuationKind.CreateTableOpeningParenthesis)
+        {
+            return new SuggestionResult
+            {
+                Mode = SuggestionMode.Completion,
+                DisplayText = "表名后缺少英文左括号：(",
+                InsertText = "(",
+                Explanation = "本地语法检查已定位到当前光标：CREATE TABLE 的表名后要先用英文半角 ( 开始字段列表。",
+                Confidence = 1
+            };
+        }
+
         if (context.ExpectedKind != SqlExpectedContinuationKind.ForeignKeyConstraint)
         {
             return null;
@@ -274,6 +299,8 @@ internal static class SqlContextAnalyzer
         var suggestion = $"{insertText} {displayText}";
         return context.ExpectedKind switch
         {
+            SqlExpectedContinuationKind.CreateTableOpeningParenthesis =>
+                insertText.TrimStart().StartsWith('('),
             SqlExpectedContinuationKind.ForeignKeyConstraint =>
                 Regex.IsMatch(suggestion, @"\bFOREIGN\s+KEY\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
             SqlExpectedContinuationKind.ConstraintType =>
