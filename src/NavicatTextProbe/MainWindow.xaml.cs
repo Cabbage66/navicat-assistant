@@ -162,8 +162,10 @@ public partial class MainWindow : Window
                 _fallbackText.Clear();
                 if (stateChanged)
                 {
-                    StatusDot.Fill = Brush(39, 174, 96);
-                    StatusText.Text = "已读取 Navicat 当前 SQL 文档全文";
+                    StatusDot.Fill = result.IsTruncated ? Brush(243, 156, 18) : Brush(39, 174, 96);
+                    StatusText.Text = result.IsTruncated
+                        ? "Navicat 当前 SQL 只读取到部分内容"
+                        : "已读取 Navicat 当前 SQL 文档全文";
                     DetailText.Text =
                         $"进程：{result.ProcessName}（PID {result.ProcessId}） | {result.Source} | " +
                         $"光标：第 {result.CaretLine?.ToString() ?? "?"} 行，第 {result.CaretColumn?.ToString() ?? "?"} 列";
@@ -258,8 +260,23 @@ public partial class MainWindow : Window
 
     private void SchedulePrediction(ProbeResult probe, bool immediate = false)
     {
-        if (!_settingsService.Current.AssistantEnabled ||
-            !_settingsService.Current.AiEnabled ||
+        if (!_settingsService.Current.AssistantEnabled)
+        {
+            return;
+        }
+
+        if (probe.IsTruncated)
+        {
+            _suggestionAcceptance = null;
+            _lastPredictionContext = null;
+            _predictionCancellation?.Cancel();
+            _predictionInFlightContext = null;
+            UpdateSuggestion(SuggestionResult.Info(
+                $"SQL 读取不完整（仅 {probe.Text.Length:N0} 字符），已暂停 AI 预测，避免给出错误续写"));
+            return;
+        }
+
+        if (!_settingsService.Current.AiEnabled ||
             string.IsNullOrWhiteSpace(probe.Text))
         {
             return;
@@ -385,6 +402,14 @@ public partial class MainWindow : Window
             UpdateSuggestion(SuggestionResult.Error(
                 "无法按当前光标生成候选",
                 "请先让 Navicat 查询编辑器位于前台，再按候选快捷键。"));
+            return;
+        }
+
+        if (probe.IsTruncated)
+        {
+            UpdateSuggestion(SuggestionResult.Error(
+                "当前 SQL 读取不完整，已停止生成候选",
+                "请确认 Navicat 编辑器原生全文读取恢复后再试，避免基于截断内容生成错误续写。"));
             return;
         }
 
@@ -559,7 +584,9 @@ public partial class MainWindow : Window
         UpdateSuggestion(SuggestionResult.Loading("正在诊断选中的 SQL……"));
         try
         {
-            var fullDocument = _lastCapturedProbe?.Text ?? selectedSql;
+            var fullDocument = _lastCapturedProbe is { IsTruncated: false } completeProbe
+                ? completeProbe.Text
+                : selectedSql;
             var stopwatch = Stopwatch.StartNew();
             var result = await _deepSeekClient.CompleteAsync(
                 _settingsService.Current,

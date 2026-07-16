@@ -188,6 +188,40 @@ Check("taskbar suggestion is excluded from app switching",
     (taskbarExtendedStyle & NativeMethods.WsExNoActivate) != 0 &&
     (taskbarExtendedStyle & NativeMethods.WsExAppWindow) == 0);
 
+var nativeEditorText = new string('w', 12_000);
+string nativeReadText = string.Empty;
+var nativeReadSucceeded = false;
+var nativeReadTruncated = true;
+Exception? nativeReadError = null;
+var nativeReadThread = new Thread(() =>
+{
+    try
+    {
+        using var textBox = new System.Windows.Forms.TextBox
+        {
+            Multiline = true,
+            Text = nativeEditorText
+        };
+        nativeReadSucceeded = NativeMethods.TryReadControlText(
+            textBox.Handle,
+            20_000,
+            out nativeReadText,
+            out nativeReadTruncated);
+    }
+    catch (Exception ex)
+    {
+        nativeReadError = ex;
+    }
+});
+nativeReadThread.SetApartmentState(ApartmentState.STA);
+nativeReadThread.Start();
+nativeReadThread.Join();
+Check("native editor text reader handles content beyond the 4096-character UIA cap",
+    nativeReadError is null && nativeReadSucceeded && !nativeReadTruncated && nativeReadText == nativeEditorText);
+Check("UI Automation Name payloads at 4096 characters are treated as incomplete",
+    !NavicatProbeService.IsLikelyUiAutomationNameTruncated(4095) &&
+    NavicatProbeService.IsLikelyUiAutomationNameTruncated(4096));
+
 var longUnicodeText = new string('a', 4095) + "😀" + new string('中', 5000);
 var expectedHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(longUnicodeText)));
 Check("chunked content hash matches SHA256 for Unicode text", ContentHasher.Sha256(longUnicodeText) == expectedHash);

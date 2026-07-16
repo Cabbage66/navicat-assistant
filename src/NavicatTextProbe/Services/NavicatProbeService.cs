@@ -10,6 +10,7 @@ namespace NavicatTextProbe.Services;
 internal sealed class NavicatProbeService
 {
     private const int MaxTextCharacters = 5_000_000;
+    internal const int UiAutomationNameCharacterLimit = 4096;
     private const int MaxScannedElements = 300;
     private const int MaxLoggedElements = 120;
     private static readonly TimeSpan IdleHeartbeatInterval = TimeSpan.FromSeconds(3);
@@ -334,11 +335,16 @@ internal sealed class NavicatProbeService
         }
 
         var candidateCount = candidates.Count;
-        TryReadNavicatEditorName(diagnostic, isFocusChain, candidates);
+        TryReadNavicatEditorWindowText(element, diagnostic, isFocusChain, candidates);
         if (candidates.Count == candidateCount)
         {
             TryReadTextPattern(element, diagnostic, isFocusChain, candidates);
             TryReadValuePattern(element, diagnostic, isFocusChain, candidates);
+        }
+
+        if (candidates.Count == candidateCount)
+        {
+            TryReadNavicatEditorName(diagnostic, isFocusChain, candidates);
         }
     }
 
@@ -433,10 +439,7 @@ internal sealed class NavicatProbeService
         bool isFocusChain,
         List<TextCandidate> candidates)
     {
-        var looksLikeNavicatEditor =
-            diagnostic.ClassName.Contains("AutoCompleteMemo", StringComparison.OrdinalIgnoreCase) ||
-            diagnostic.ClassName.Contains("QueryMemo", StringComparison.OrdinalIgnoreCase) ||
-            diagnostic.ClassName.Contains("SqlEditor", StringComparison.OrdinalIgnoreCase);
+        var looksLikeNavicatEditor = LooksLikeNavicatEditor(diagnostic);
         var looksLikeFocusedMultilineEditor =
             isFocusChain &&
             diagnostic.Name.Length >= 10 &&
@@ -447,8 +450,9 @@ internal sealed class NavicatProbeService
             return;
         }
 
-        var truncated = diagnostic.Name.Length > MaxTextCharacters;
-        var text = truncated ? diagnostic.Name[..MaxTextCharacters] : diagnostic.Name;
+        var exceedsLocalLimit = diagnostic.Name.Length > MaxTextCharacters;
+        var truncated = IsLikelyUiAutomationNameTruncated(diagnostic.Name.Length) || exceedsLocalLimit;
+        var text = exceedsLocalLimit ? diagnostic.Name[..MaxTextCharacters] : diagnostic.Name;
         candidates.Add(new TextCandidate(
             "UI Automation AutomationElement.Name（Navicat 编辑器全文）",
             text,
@@ -458,6 +462,52 @@ internal sealed class NavicatProbeService
             isFocusChain,
             diagnostic));
     }
+
+    private static void TryReadNavicatEditorWindowText(
+        AutomationElement element,
+        ElementDiagnostic diagnostic,
+        bool isFocusChain,
+        List<TextCandidate> candidates)
+    {
+        if (!LooksLikeNavicatEditor(diagnostic))
+        {
+            return;
+        }
+
+        var rawHandle = SafeGet(() => element.Current.NativeWindowHandle, 0);
+        if (rawHandle == 0 ||
+            !NativeMethods.TryReadControlText(new nint(rawHandle), MaxTextCharacters, out var text, out var truncated))
+        {
+            return;
+        }
+
+        // UI Automation Name is capped at 4096 characters on this Navicat provider.
+        // If WM_GETTEXT returns the exact same capped payload, keep the result marked
+        // incomplete so it can never be sent to the model as a reliable full document.
+        if (text.Length == UiAutomationNameCharacterLimit &&
+            diagnostic.Name.Length == UiAutomationNameCharacterLimit &&
+            string.Equals(text, diagnostic.Name, StringComparison.Ordinal))
+        {
+            truncated = true;
+        }
+
+        candidates.Add(new TextCandidate(
+            "Win32 WM_GETTEXT（Navicat 编辑器全文）",
+            text,
+            null,
+            null,
+            truncated,
+            isFocusChain,
+            diagnostic));
+    }
+
+    internal static bool IsLikelyUiAutomationNameTruncated(int textLength) =>
+        textLength >= UiAutomationNameCharacterLimit;
+
+    private static bool LooksLikeNavicatEditor(ElementDiagnostic diagnostic) =>
+        diagnostic.ClassName.Contains("AutoCompleteMemo", StringComparison.OrdinalIgnoreCase) ||
+        diagnostic.ClassName.Contains("QueryMemo", StringComparison.OrdinalIgnoreCase) ||
+        diagnostic.ClassName.Contains("SqlEditor", StringComparison.OrdinalIgnoreCase);
 
     private static TextCandidate? ChooseBest(IEnumerable<TextCandidate> candidates) =>
         candidates

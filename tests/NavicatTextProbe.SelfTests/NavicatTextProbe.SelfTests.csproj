@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>NavicatTextProbe.SelfTests</AssemblyName>
     <UseAppHost>false</UseAppHost>
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/NavicatTextProbe/NavicatTextProbe.csproj" />
