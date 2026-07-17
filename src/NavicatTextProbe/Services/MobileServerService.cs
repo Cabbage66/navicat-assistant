@@ -22,7 +22,7 @@ internal sealed class MobileServerService : IAsyncDisposable
     private int _nextClientTaskId;
     private CancellationTokenSource? _serverCancellation;
     private Task? _serverLoop;
-    private SuggestionResult _suggestion = SuggestionResult.Info("等待 Navicat SQL…");
+    private SuggestionResult _suggestion = SuggestionResult.Info("等待 Navicat SQL 或 Word 练习题…");
     private AppSettings _settings = new();
 
     public bool IsRunning => _listener is not null;
@@ -261,6 +261,7 @@ internal sealed class MobileServerService : IAsyncDisposable
                                 _settings.TaskbarPanelEnabled,
                                 _settings.TaskbarWidth,
                                 _settings.MobileServerEnabled,
+                                _settings.WordExerciseHotkey,
                                 taskbarStyle = _settings.TaskbarStyle,
                                 mobileStyle = _settings.MobileStyle
                             }
@@ -397,12 +398,14 @@ internal sealed class MobileServerService : IAsyncDisposable
         </head>
         <body>
           <h1>Assistant <span id="mode" class="badge">等待</span></h1>
-          <section class="card"><h2>当前最有用的建议</h2><div id="display">等待 Navicat SQL…</div></section>
-          <section class="card"><h2>完整建议代码</h2><pre id="insert">—</pre><div id="candidateBlock" hidden><h2>本次 3 个候选（电脑按 Ctrl+Alt+R 切换）</h2><ol id="candidates"></ol></div><h2>为什么</h2><div id="explanation">—</div><ul id="issues"></ul></section>
+          <section class="card"><h2>当前最有用的建议</h2><div id="display">等待 Assistant…</div></section>
+          <section id="exerciseCard" class="card" hidden><h2 id="questionTitle">完整题目</h2><pre id="question">—</pre><h2>完整参考答案</h2><pre id="fullAnswer">—</pre></section>
+          <section class="card"><h2 id="insertTitle">完整建议</h2><pre id="insert">—</pre><div id="candidateBlock" hidden><h2>本次 3 个候选（电脑按 Ctrl+Alt+R 切换）</h2><ol id="candidates"></ol></div><h2>答案解析 / 原因</h2><div id="explanation">—</div><ul id="issues"></ul></section>
           <details class="card"><summary>展示配置</summary><p class="muted">保存后会同步到电脑任务栏和当前手机页面。</p>
             <div class="grid">
               <label><input id="taskbarPanelEnabled" type="checkbox"> 开启任务栏内建议</label>
               <div class="field"><label>任务栏期望宽度</label><input id="taskbarWidth" type="number" min="200" max="1400" step="20"></div>
+              <div class="field"><label>识别/切换 Word 当前题目快捷键</label><input id="wordExerciseHotkey" type="text" placeholder="Ctrl+Alt+A"></div>
               <div class="field"><label>任务栏字号</label><input id="taskbarFont" type="number" min="10" max="36" step="1"></div>
               <div class="field"><label>任务栏行高</label><input id="taskbarLine" type="number" min="12" max="54" step="1"></div>
               <div class="field"><label>任务栏背景色</label><input id="taskbarBg" type="color"></div>
@@ -419,17 +422,20 @@ internal sealed class MobileServerService : IAsyncDisposable
             const token=new URLSearchParams(location.search).get('token')||'';let populated=false;
             const $=id=>document.getElementById(id); const api=p=>p+'?token='+encodeURIComponent(token);
             async function refresh(){try{const r=await fetch(api('/api/state'));if(!r.ok)throw Error(r.status);const x=await r.json(),s=x.suggestion||{},c=x.settings||{};
-              const cs=s.candidates||[],active=s.activeCandidateIndex||0;$('mode').textContent=cs.length?`候选 ${active+1}/${cs.length}`:(['补全','诊断','状态','错误'][s.mode]||'建议');$('display').textContent=s.displayText||'当前没有足够可靠的建议';$('insert').textContent=s.insertText||'—';$('explanation').textContent=s.explanation||'—';
+              const cs=s.candidates||[],active=s.activeCandidateIndex||0,modes=['补全','诊断','状态','错误','题目回答','题目续写'],types={choice:'选择题',fill_blank:'填空题',short_answer:'简答题',unknown:'题目'},exercise=s.mode===4||s.mode===5;
+              let mode=cs.length?`候选 ${active+1}/${cs.length}`:(modes[s.mode]||'建议');if(s.questionType)mode+=` · ${types[s.questionType]||s.questionType}`;if(exercise&&s.questionNumber)mode+=s.questionNumber==='当前题'?' · 当前题':` · 第 ${s.questionNumber} 题`;if(exercise&&s.activeSubquestionNumber)mode+=` · 子问 ${s.activeSubquestionNumber}`;$('mode').textContent=mode;$('display').textContent=s.displayText||'当前没有足够可靠的建议';$('insert').textContent=s.insertText||'—';$('insertTitle').textContent=s.mode===4?'本次答案文本':s.mode===5?'当前光标续写':'完整建议代码';$('explanation').textContent=s.explanation||'—';
+              $('exerciseCard').hidden=!exercise;$('questionTitle').textContent=exercise?(s.questionNumber&&s.questionNumber!=='当前题'?`第 ${s.questionNumber} 题 · 完整题目`:'当前完整题目'):'完整题目';$('question').textContent=s.questionText||'—';$('fullAnswer').textContent=s.fullAnswer||'—';
               $('candidateBlock').hidden=!cs.length;$('candidates').replaceChildren(...cs.map((c,i)=>{const li=document.createElement('li');li.textContent=`${i+1}. ${c.displayText||c.insertText||'—'}`;if(i===active)li.className='active';return li}));
               $('issues').replaceChildren(...(s.issues||[]).map(i=>{const li=document.createElement('li');li.textContent=i;return li}));
               const m=c.mobileStyle||{};$('display').style.fontSize=(m.fontSize||18)+'px';$('display').style.lineHeight=(m.lineHeight||28)+'px';$('display').style.color=m.fontColor||'#7df2b1';
               const rgba=(hex,a)=>{const v=(hex||'#151d27').replace('#','');const n=parseInt(v.length===3?v.split('').map(x=>x+x).join(''):v,16);return `rgba(${n>>16},${n>>8&255},${n&255},${a??.96})`};document.querySelectorAll('.card').forEach(x=>x.style.backgroundColor=rgba(m.backgroundColor,m.backgroundOpacity));
               if(!populated){populated=true;$('taskbarPanelEnabled').checked=!!c.taskbarPanelEnabled;const t=c.taskbarStyle||{};
                 $('taskbarWidth').value=c.taskbarWidth||640;
+                $('wordExerciseHotkey').value=c.wordExerciseHotkey||'Ctrl+Alt+A';
                 $('taskbarFont').value=t.fontSize||14;$('taskbarLine').value=t.lineHeight||21;$('taskbarBg').value=t.backgroundColor||'#17202a';$('taskbarFg').value=t.fontColor||'#f8f9f9';$('taskbarOpacity').value=t.backgroundOpacity||.92;
                 $('mobileFont').value=m.fontSize||18;$('mobileLine').value=m.lineHeight||28;$('mobileBg').value=m.backgroundColor||'#151d27';$('mobileFg').value=m.fontColor||'#7df2b1';$('mobileOpacity').value=m.backgroundOpacity||.96;}}
               catch(e){$('display').textContent='无法连接电脑端：'+e.message}}
-            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,taskbarWidth:+$('taskbarWidth').value,taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
+            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,taskbarWidth:+$('taskbarWidth').value,wordExerciseHotkey:$('wordExerciseHotkey').value.trim(),taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
               const r=await fetch(api('/api/settings'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('saved').textContent=r.ok?'已保存':'保存失败';setTimeout(()=>$('saved').textContent='',1800)};
             refresh();setInterval(refresh,1200);
           </script>
@@ -441,6 +447,7 @@ internal sealed record MobileSettingsPatch
 {
     public bool? TaskbarPanelEnabled { get; init; }
     public double? TaskbarWidth { get; init; }
+    public string? WordExerciseHotkey { get; init; }
     public double? TaskbarFontSize { get; init; }
     public double? TaskbarLineHeight { get; init; }
     public string? TaskbarBackgroundColor { get; init; }

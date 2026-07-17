@@ -24,11 +24,15 @@ internal static class NativeMethods
     internal const int WmKeyDown = 0x0100;
     internal const int WmSysKeyDown = 0x0104;
     internal const uint KeyeventfKeyup = 0x0002;
+    internal const uint GaRoot = 2;
 
     internal delegate nint LowLevelKeyboardProc(int code, nint wParam, nint lParam);
 
     [DllImport("user32.dll")]
     internal static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    internal static extern nint GetAncestor(nint windowHandle, uint flags);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     internal static extern nint FindWindow(string? className, string? windowName);
@@ -82,6 +86,15 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern uint GetWindowThreadProcessId(nint windowHandle, out uint processId);
+
+    [DllImport("ole32.dll", CharSet = CharSet.Unicode)]
+    private static extern int CLSIDFromProgID(string programId, out Guid classId);
+
+    [DllImport("oleaut32.dll", PreserveSig = false)]
+    private static extern void GetActiveObject(
+        ref Guid classId,
+        nint reserved,
+        [MarshalAs(UnmanagedType.IUnknown)] out object activeObject);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -148,6 +161,18 @@ internal static class NativeMethods
         var buffer = new StringBuilder(length + 1);
         _ = GetWindowText(windowHandle, buffer, buffer.Capacity);
         return buffer.ToString();
+    }
+
+    internal static object GetActiveComObject(string programId)
+    {
+        var result = CLSIDFromProgID(programId, out var classId);
+        if (result < 0)
+        {
+            Marshal.ThrowExceptionForHR(result);
+        }
+
+        GetActiveObject(ref classId, nint.Zero, out var activeObject);
+        return activeObject;
     }
 
     internal static bool TryReadControlText(

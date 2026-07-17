@@ -9,7 +9,8 @@ internal enum HotkeyAction
 {
     ToggleAssistant,
     CycleCandidates,
-    AnalyzeSelection
+    AnalyzeSelection,
+    IdentifyWordExercise
 }
 
 internal sealed class GlobalHotkeyService : IDisposable

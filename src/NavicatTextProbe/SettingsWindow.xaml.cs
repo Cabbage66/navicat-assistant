@@ -60,6 +60,7 @@ public partial class SettingsWindow : Window
         AssistantHotkeyTextBox.Text = _workingCopy.ToggleAssistantHotkey;
         AnalyzeHotkeyTextBox.Text = _workingCopy.AnalyzeSelectionHotkey;
         CandidateHotkeyTextBox.Text = _workingCopy.CycleCandidatesHotkey;
+        WordExerciseHotkeyTextBox.Text = _workingCopy.WordExerciseHotkey;
     }
 
     private void SaveButton_OnClick(object sender, RoutedEventArgs e)
@@ -105,6 +106,7 @@ public partial class SettingsWindow : Window
         _workingCopy.ToggleAssistantHotkey = AssistantHotkeyTextBox.Text.Trim();
         _workingCopy.AnalyzeSelectionHotkey = AnalyzeHotkeyTextBox.Text.Trim();
         _workingCopy.CycleCandidatesHotkey = CandidateHotkeyTextBox.Text.Trim();
+        _workingCopy.WordExerciseHotkey = WordExerciseHotkeyTextBox.Text.Trim();
 
         UpdatedSettings = _workingCopy;
         DialogResult = true;

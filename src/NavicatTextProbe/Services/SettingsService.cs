@@ -104,12 +104,23 @@ internal sealed class SettingsService
             settings.SettingsVersion = 3;
         }
 
+        if (settings.SettingsVersion < 4)
+        {
+            settings.WordExerciseHotkey = string.IsNullOrWhiteSpace(settings.WordExerciseHotkey)
+                ? "Ctrl+Alt+A"
+                : settings.WordExerciseHotkey;
+            settings.SettingsVersion = 4;
+        }
+
         settings.ApiBaseUrl = string.IsNullOrWhiteSpace(settings.ApiBaseUrl)
             ? "https://api.deepseek.com"
             : settings.ApiBaseUrl.TrimEnd('/');
         settings.Model = string.IsNullOrWhiteSpace(settings.Model)
             ? "deepseek-v4-flash"
             : settings.Model.Trim();
+        settings.WordExerciseHotkey = string.IsNullOrWhiteSpace(settings.WordExerciseHotkey)
+            ? "Ctrl+Alt+A"
+            : settings.WordExerciseHotkey.Trim();
         settings.MobilePort = Math.Clamp(settings.MobilePort, 1024, 65535);
         settings.PredictionDebounceMilliseconds = Math.Clamp(settings.PredictionDebounceMilliseconds, 150, 5000);
         settings.PredictionMinimumIntervalMilliseconds = Math.Clamp(settings.PredictionMinimumIntervalMilliseconds, 500, 5000);

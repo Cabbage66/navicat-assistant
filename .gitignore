@@ -3,6 +3,7 @@
 dist/
 logs/*.jsonl
 logs/latest-log.txt
+logs/latest-*-probe.txt
 logs/*.png
 config/settings.json
 config/settings.json.tmp

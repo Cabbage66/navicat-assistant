@@ -25,7 +25,8 @@ internal sealed class DeepSeekClient : IDisposable
         string userPrompt,
         CancellationToken cancellationToken,
         int maxTokens = 500,
-        double temperature = 0.2)
+        double temperature = 0.2,
+        string? systemPrompt = null)
     {
         if (string.IsNullOrWhiteSpace(apiKey))
         {
@@ -40,7 +41,7 @@ internal sealed class DeepSeekClient : IDisposable
             model = settings.Model,
             messages = new object[]
             {
-                new { role = "system", content = PromptTemplates.BuildSystemPrompt(settings) },
+                new { role = "system", content = systemPrompt ?? PromptTemplates.BuildSystemPrompt(settings) },
                 new { role = "user", content = userPrompt }
             },
             thinking = new { type = "disabled" },
@@ -79,15 +80,27 @@ internal sealed class DeepSeekClient : IDisposable
                 return SuggestionResult.Error("无法解析 DeepSeek 的 JSON 结果");
             }
 
-            var mode = string.Equals(payload.Mode, "diagnosis", StringComparison.OrdinalIgnoreCase)
-                ? SuggestionMode.Diagnosis
-                : SuggestionMode.Completion;
+            var mode = payload.Mode?.Trim().ToLowerInvariant() switch
+            {
+                "diagnosis" => SuggestionMode.Diagnosis,
+                "exercise_answer" => SuggestionMode.ExerciseAnswer,
+                "exercise_continuation" => SuggestionMode.ExerciseContinuation,
+                "not_exercise" => SuggestionMode.Information,
+                _ => SuggestionMode.Completion
+            };
             var issues = (payload.Issues ?? [])
                 .OrderBy(IssuePriority)
                 .ToArray();
             var displayText = mode == SuggestionMode.Diagnosis && issues.Length > 0
                 ? CompactDisplay(issues[0])
                 : CompactDisplay(payload.DisplayText);
+            if (string.IsNullOrWhiteSpace(displayText) &&
+                mode is SuggestionMode.ExerciseAnswer or SuggestionMode.ExerciseContinuation)
+            {
+                displayText = CompactDisplay(string.IsNullOrWhiteSpace(payload.FullAnswer)
+                    ? payload.InsertText
+                    : payload.FullAnswer);
+            }
             var candidates = (payload.Candidates ?? [])
                 .Where(candidate =>
                     !string.IsNullOrWhiteSpace(candidate.InsertText) ||
@@ -116,15 +129,40 @@ internal sealed class DeepSeekClient : IDisposable
                 displayText = first.DisplayText;
             }
 
+            var usage = envelope.RootElement.TryGetProperty("usage", out var usageElement)
+                ? usageElement
+                : default;
             var result = new SuggestionResult
             {
                 Mode = mode,
                 DisplayText = displayText,
                 InsertText = candidates.Length > 0 ? candidates[0].InsertText : payload.InsertText?.TrimEnd() ?? string.Empty,
                 Explanation = candidates.Length > 0 ? candidates[0].Explanation : payload.Explanation?.Trim() ?? string.Empty,
+                QuestionType = mode is SuggestionMode.ExerciseAnswer or SuggestionMode.ExerciseContinuation
+                    ? NormalizeQuestionType(payload.QuestionType)
+                    : string.Empty,
+                IsQuestion = payload.IsQuestion ??
+                    mode is SuggestionMode.ExerciseAnswer or SuggestionMode.ExerciseContinuation,
+                ContextComplete = payload.ContextComplete ?? true,
+                NeedsMoreContext = NormalizeNeedsMoreContext(payload.NeedsMoreContext),
+                SameAsCurrentQuestion = payload.SameAsCurrentQuestion ?? true,
+                QuestionNumber = payload.QuestionNumber?.Trim() ?? string.Empty,
+                ActiveSubquestionNumber = payload.ActiveSubquestionNumber?.Trim() ?? string.Empty,
+                QuestionStartBlockId = payload.QuestionStartBlockId?.Trim() ?? string.Empty,
+                QuestionEndBlockId = payload.QuestionEndBlockId?.Trim() ?? string.Empty,
+                QuestionStartAnchor = payload.QuestionStartAnchor?.Trim() ?? string.Empty,
+                QuestionEndAnchor = payload.QuestionEndAnchor?.Trim() ?? string.Empty,
+                QuestionText = payload.QuestionText?.Trim() ?? string.Empty,
+                AnswerState = NormalizeAnswerState(payload.AnswerState),
+                DetectedUserAnswer = payload.DetectedUserAnswer?.Trim() ?? string.Empty,
+                FullAnswer = payload.FullAnswer?.Trim() ?? string.Empty,
                 Issues = issues,
                 Confidence = candidates.Length > 0 ? candidates[0].Confidence : Math.Clamp(payload.Confidence, 0, 1),
-                Candidates = candidates
+                Candidates = candidates,
+                PromptTokens = ReadUsageInt(usage, "prompt_tokens"),
+                PromptCacheHitTokens = ReadUsageInt(usage, "prompt_cache_hit_tokens"),
+                PromptCacheMissTokens = ReadUsageInt(usage, "prompt_cache_miss_tokens"),
+                CompletionTokens = ReadUsageInt(usage, "completion_tokens")
             };
             return candidates.Length > 0 ? result.SelectCandidate(0) : result;
         }
@@ -159,6 +197,37 @@ internal sealed class DeepSeekClient : IDisposable
     private static string NormalizeSuggestion(string text) =>
         string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
 
+    private static string NormalizeQuestionType(string? questionType) => questionType?.Trim().ToLowerInvariant() switch
+    {
+        "choice" => "choice",
+        "fill_blank" or "fillblank" => "fill_blank",
+        "short_answer" or "shortanswer" => "short_answer",
+        _ => "unknown"
+    };
+
+    private static string NormalizeNeedsMoreContext(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "before" => "before",
+        "after" => "after",
+        "both" => "both",
+        _ => "none"
+    };
+
+    private static string NormalizeAnswerState(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "empty" => "empty",
+        "partial" => "partial",
+        "complete" => "complete",
+        _ => "uncertain"
+    };
+
+    private static int ReadUsageInt(JsonElement usage, string propertyName) =>
+        usage.ValueKind == JsonValueKind.Object &&
+        usage.TryGetProperty(propertyName, out var value) &&
+        value.TryGetInt32(out var result)
+            ? result
+            : 0;
+
     private static int IssuePriority(string issue)
     {
         if (issue.Contains("P0", StringComparison.OrdinalIgnoreCase)) return 0;
@@ -182,6 +251,51 @@ internal sealed class DeepSeekClient : IDisposable
 
         [JsonPropertyName("explanation")]
         public string? Explanation { get; init; }
+
+        [JsonPropertyName("question_type")]
+        public string? QuestionType { get; init; }
+
+        [JsonPropertyName("is_question")]
+        public bool? IsQuestion { get; init; }
+
+        [JsonPropertyName("context_complete")]
+        public bool? ContextComplete { get; init; }
+
+        [JsonPropertyName("needs_more_context")]
+        public string? NeedsMoreContext { get; init; }
+
+        [JsonPropertyName("same_as_current_question")]
+        public bool? SameAsCurrentQuestion { get; init; }
+
+        [JsonPropertyName("question_number")]
+        public string? QuestionNumber { get; init; }
+
+        [JsonPropertyName("active_subquestion_number")]
+        public string? ActiveSubquestionNumber { get; init; }
+
+        [JsonPropertyName("question_start_block_id")]
+        public string? QuestionStartBlockId { get; init; }
+
+        [JsonPropertyName("question_end_block_id")]
+        public string? QuestionEndBlockId { get; init; }
+
+        [JsonPropertyName("question_start_anchor")]
+        public string? QuestionStartAnchor { get; init; }
+
+        [JsonPropertyName("question_end_anchor")]
+        public string? QuestionEndAnchor { get; init; }
+
+        [JsonPropertyName("question_text")]
+        public string? QuestionText { get; init; }
+
+        [JsonPropertyName("answer_state")]
+        public string? AnswerState { get; init; }
+
+        [JsonPropertyName("detected_user_answer")]
+        public string? DetectedUserAnswer { get; init; }
+
+        [JsonPropertyName("full_answer")]
+        public string? FullAnswer { get; init; }
 
         [JsonPropertyName("issues")]
         public IReadOnlyList<string>? Issues { get; init; }

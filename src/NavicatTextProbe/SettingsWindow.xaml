@@ -146,6 +146,7 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="210" />
@@ -157,6 +158,8 @@
                             <TextBox x:Name="AnalyzeHotkeyTextBox" Grid.Row="1" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
                             <TextBlock Grid.Row="2" Margin="0,8,0,0" VerticalAlignment="Center" Text="生成/切换 3 个续写候选" />
                             <TextBox x:Name="CandidateHotkeyTextBox" Grid.Row="2" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
+                            <TextBlock Grid.Row="3" Margin="0,8,0,0" VerticalAlignment="Center" Text="识别/切换 Word 当前题目" />
+                            <TextBox x:Name="WordExerciseHotkeyTextBox" Grid.Row="3" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
                         </Grid>
                     </StackPanel>
                 </ScrollViewer>

@@ -5,7 +5,9 @@ public enum SuggestionMode
     Completion,
     Diagnosis,
     Information,
-    Error
+    Error,
+    ExerciseAnswer,
+    ExerciseContinuation
 }
 
 public sealed record SuggestionCandidate
@@ -24,8 +26,27 @@ public sealed record SuggestionResult
     public string DisplayText { get; init; } = string.Empty;
     public string InsertText { get; init; } = string.Empty;
     public string Explanation { get; init; } = string.Empty;
+    public string QuestionType { get; init; } = string.Empty;
+    public bool IsQuestion { get; init; }
+    public bool ContextComplete { get; init; } = true;
+    public string NeedsMoreContext { get; init; } = "none";
+    public bool SameAsCurrentQuestion { get; init; } = true;
+    public string QuestionNumber { get; init; } = string.Empty;
+    public string ActiveSubquestionNumber { get; init; } = string.Empty;
+    public string QuestionStartBlockId { get; init; } = string.Empty;
+    public string QuestionEndBlockId { get; init; } = string.Empty;
+    public string QuestionStartAnchor { get; init; } = string.Empty;
+    public string QuestionEndAnchor { get; init; } = string.Empty;
+    public string QuestionText { get; init; } = string.Empty;
+    public string AnswerState { get; init; } = string.Empty;
+    public string DetectedUserAnswer { get; init; } = string.Empty;
+    public string FullAnswer { get; init; } = string.Empty;
     public IReadOnlyList<string> Issues { get; init; } = [];
     public double Confidence { get; init; }
+    public int PromptTokens { get; init; }
+    public int PromptCacheHitTokens { get; init; }
+    public int PromptCacheMissTokens { get; init; }
+    public int CompletionTokens { get; init; }
     public bool IsLoading { get; init; }
     public IReadOnlyList<SuggestionCandidate> Candidates { get; init; } = [];
     public int ActiveCandidateIndex { get; init; }

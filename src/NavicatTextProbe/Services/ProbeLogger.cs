@@ -106,6 +106,33 @@ internal sealed class ProbeLogger : IDisposable
         result.Diagnostics
     });
 
+    public void WriteDocumentContext(DocumentContextResult result) => Write("document_context", new
+    {
+        result.Timestamp,
+        result.Status,
+        result.ApplicationName,
+        result.ProcessName,
+        result.ProcessId,
+        result.WindowHandle,
+        result.WindowTitle,
+        result.DocumentName,
+        result.DocumentIdentity,
+        result.Source,
+        textLength = result.Text.Length,
+        result.ContentHash,
+        result.CaretOffset,
+        result.CaretAvailable,
+        contextBefore = LimitDocumentLogText(result.ContextBefore),
+        contextAfter = LimitDocumentLogText(result.ContextAfter),
+        result.SelectionAvailable,
+        result.HasSelection,
+        selectedText = LimitDocumentLogText(result.SelectedText),
+        selectedTextLength = result.SelectedText.Length,
+        result.IsPartial,
+        result.Message,
+        result.Diagnostics
+    });
+
     public void WriteConfiguration(AppSettings settings) => Write("configuration", new
     {
         settings.AssistantEnabled,
@@ -118,10 +145,18 @@ internal sealed class ProbeLogger : IDisposable
         settings.TaskbarWidth,
         settings.MobileServerEnabled,
         settings.KeyboardFallbackEnabled,
+        settings.WordExerciseHotkey,
         note = "API Key、手机访问令牌和自定义全局提示词不会写入探测日志。"
     });
 
-    public void WriteSuggestion(string trigger, int contextCharacters, long elapsedMilliseconds, SuggestionResult result) =>
+    public void WriteSuggestion(
+        string trigger,
+        int contextCharacters,
+        long elapsedMilliseconds,
+        SuggestionResult result,
+        WordExerciseRequestContext? wordContext = null)
+    {
+        var isExercise = result.Mode is SuggestionMode.ExerciseAnswer or SuggestionMode.ExerciseContinuation;
         Write("suggestion", new
         {
             trigger,
@@ -129,13 +164,35 @@ internal sealed class ProbeLogger : IDisposable
             elapsedMilliseconds,
             result.Mode,
             result.DisplayText,
-            result.InsertText,
-            result.Explanation,
+            insertText = isExercise ? null : result.InsertText,
+            explanation = isExercise ? null : result.Explanation,
+            result.QuestionType,
+            result.IsQuestion,
+            result.ContextComplete,
+            result.NeedsMoreContext,
+            result.SameAsCurrentQuestion,
+            result.QuestionNumber,
+            result.ActiveSubquestionNumber,
+            result.AnswerState,
+            questionTextCharacters = result.QuestionText.Length,
+            detectedUserAnswerCharacters = result.DetectedUserAnswer.Length,
+            fullAnswerCharacters = result.FullAnswer.Length,
+            insertTextCharacters = result.InsertText.Length,
             result.Issues,
             result.Confidence,
             result.ActiveCandidateIndex,
-            result.Candidates
+            result.Candidates,
+            result.PromptTokens,
+            result.PromptCacheHitTokens,
+            result.PromptCacheMissTokens,
+            result.CompletionTokens,
+            wordRequestMode = wordContext?.Mode.ToString(),
+            wordWindowStart = wordContext?.WindowStart,
+            wordWindowEnd = wordContext?.WindowEnd,
+            wordRadius = wordContext?.Radius,
+            wordExpansionLevel = wordContext?.ExpansionLevel
         });
+    }
 
     public void WriteHealthSnapshot()
     {
@@ -245,6 +302,18 @@ internal sealed class ProbeLogger : IDisposable
         }
 
         return $"[已省略可能重复的编辑器全文，共 {name.Length:N0} 字符] {firstLine}".TrimEnd();
+    }
+
+    private static string LimitDocumentLogText(string text)
+    {
+        const int maximumCharacters = 320;
+        if (text.Length <= maximumCharacters)
+        {
+            return text;
+        }
+
+        var half = maximumCharacters / 2;
+        return text[..half] + "…" + text[^half..];
     }
 
     public void Dispose()

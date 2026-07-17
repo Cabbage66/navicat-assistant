@@ -17,6 +17,7 @@ public partial class MainWindow : Window
 {
     private readonly DispatcherTimer _probeTimer;
     private readonly NavicatProbeService _probeService = new();
+    private readonly DocumentContextProbeService _documentContextProbeService = new();
     private readonly ProbeLogger _logger;
     private readonly SettingsService _settingsService;
     private readonly DeepSeekClient _deepSeekClient = new();
@@ -31,12 +32,15 @@ public partial class MainWindow : Window
     private readonly Queue<string> _candidateCacheOrder = new();
     private CancellationTokenSource? _predictionCancellation;
     private ProbeResult? _lastCapturedProbe;
-    private SuggestionResult _currentSuggestion = SuggestionResult.Info("等待 Navicat SQL……");
+    private DocumentContextResult? _lastDocumentContext;
+    private SuggestionResult _currentSuggestion = SuggestionResult.Info("等待 Navicat SQL 或 Word 练习题……");
     private bool _captureInProgress;
     private bool _exitRequested;
     private bool _fallbackSessionInitialized;
     private bool _sqlViewDirty;
     private bool _suggestionViewDirty;
+    private bool _forceNextExerciseRequest;
+    private bool _wordExerciseLocateRequested;
     private int _fallbackCaret;
     private string? _lastContentHash;
     private string? _lastStateKey;
@@ -46,10 +50,19 @@ public partial class MainWindow : Window
     private string? _manualCandidateRequestProbeKey;
     private string? _apiKey;
     private SuggestionAcceptanceState? _suggestionAcceptance;
+    private SuggestionAcceptanceState? _exerciseSuggestionAcceptance;
+    private WordExerciseQuestionState? _wordExerciseQuestion;
+    private SuggestionResult? _lastWordExerciseSuggestion;
+    private string _wordExerciseBaselineText = string.Empty;
+    private string _wordExercisePendingDocumentIdentity = string.Empty;
+    private string? _wordExerciseLastProcessedStateKey;
+    private bool _wordExerciseCaretOutsideCurrentQuestion;
     private ProbeResult? _pendingCaptureLog;
     private DateTimeOffset _pendingCaptureChangedAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastHealthSnapshotAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastCompletionRequestStarted = DateTimeOffset.MinValue;
+    private string? _lastExerciseRequestContext;
+    private string? _exerciseInFlightContext;
     private bool _candidateRequestInProgress;
 
     public MainWindow()
@@ -126,10 +139,18 @@ public partial class MainWindow : Window
         _captureInProgress = true;
         try
         {
-            var result = await Task.Run(() => _probeService.CaptureForegroundNavicat(forceRefresh));
-            if (_settingsService.Current.AssistantEnabled)
+            var documentResult = await _documentContextProbeService.CaptureForegroundAsync();
+            if (_settingsService.Current.AssistantEnabled && documentResult.IsTargetApplication)
             {
-                ApplyProbeResult(result);
+                ApplyDocumentContextResult(documentResult);
+            }
+            else if (_settingsService.Current.AssistantEnabled)
+            {
+                var result = await Task.Run(() => _probeService.CaptureForegroundNavicat(forceRefresh));
+                if (_settingsService.Current.AssistantEnabled)
+                {
+                    ApplyProbeResult(result);
+                }
             }
             if (_settingsService.Current.AssistantEnabled &&
                 DateTimeOffset.UtcNow - _lastHealthSnapshotAt >= TimeSpan.FromMinutes(1))
@@ -148,6 +169,711 @@ public partial class MainWindow : Window
         }
     }
 
+    private void ApplyDocumentContextResult(DocumentContextResult result)
+    {
+        FlushPendingCaptureLog(force: true);
+        _keyboardFallbackService.Stop();
+        _fallbackSessionInitialized = false;
+        _fallbackText.Clear();
+
+        var selectionHash = ContentHasher.Sha256(result.SelectedText);
+        var stateKey = $"document|{result.Status}|{result.ProcessId}|{result.Source}|{result.ContentHash}|" +
+                       $"{result.CaretOffset}|{result.CaretAvailable}|{result.SelectionAvailable}|{selectionHash}|{result.Message}";
+        var stateChanged = !string.Equals(_lastStateKey, stateKey, StringComparison.Ordinal);
+        _lastStateKey = stateKey;
+
+        if (stateChanged)
+        {
+            var captured = result.Status == DocumentContextStatus.Captured;
+            StatusDot.Fill = captured
+                ? result.IsPartial ? Brush(243, 156, 18) : Brush(39, 174, 96)
+                : Brush(192, 57, 43);
+            StatusText.Text = result.Message;
+            DetailText.Text =
+                $"软件：{result.ApplicationName} | 来源：{result.Source} | " +
+                $"正文：{result.Text.Length:N0} 字符 | 光标：{(result.CaretAvailable ? "已识别" : "未识别")} | " +
+                $"选区：{(result.SelectionAvailable ? result.HasSelection ? $"{result.SelectedText.Length:N0} 字符" : "无" : "未识别")}";
+            _logger.WriteDocumentContext(result);
+        }
+
+        if (result.Status == DocumentContextStatus.Captured)
+        {
+            _lastDocumentContext = result;
+            var documentContentKey = "document|" + result.ContentHash;
+            if (!string.Equals(_lastContentHash, documentContentKey, StringComparison.Ordinal))
+            {
+                _lastContentHash = documentContentKey;
+                if (IsVisible)
+                {
+                    SqlTextBox.Text = result.Text;
+                    _sqlViewDirty = false;
+                }
+                else
+                {
+                    _sqlViewDirty = true;
+                }
+                LengthText.Text = result.IsPartial
+                    ? $"已暴露 {result.Text.Length:N0} 字符（可能不完整）"
+                    : $"{result.Text.Length:N0} 字符";
+            }
+        }
+
+        if (result.Status == DocumentContextStatus.Captured && IsWordDocument(result))
+        {
+            PrepareForWordExerciseMode();
+            if ((_wordExerciseQuestion is not null || _wordExerciseLocateRequested) &&
+                !string.Equals(
+                    _wordExerciseQuestion?.DocumentIdentity ?? _wordExercisePendingDocumentIdentity,
+                    result.DocumentIdentity,
+                    StringComparison.Ordinal))
+            {
+                ClearWordExerciseSession(cancelRequest: true);
+                UpdateSuggestion(SuggestionResult.Info(
+                    $"已切换 Word 文档，请按 {_settingsService.Current.WordExerciseHotkey} 识别题目"));
+                return;
+            }
+
+            if (_wordExerciseLocateRequested)
+            {
+                var immediate = _forceNextExerciseRequest;
+                _forceNextExerciseRequest = false;
+                ScheduleWordExercise(result, WordExerciseRequestMode.LocateAndAnswer, immediate);
+                return;
+            }
+
+            if (_wordExerciseQuestion is not null)
+            {
+                if (!result.CaretAvailable)
+                {
+                    ResetExerciseRequestState(cancelRequest: true);
+                    UpdateSuggestion(SuggestionResult.Info(
+                        $"当前仍是 {_wordExerciseQuestion.DisplayLabel}；Word 暂未提供可靠光标"));
+                    return;
+                }
+
+                if (result.HasSelection)
+                {
+                    ResetExerciseRequestState(cancelRequest: true, clearAcceptance: false);
+                    StatusText.Text = $"当前题目：{_wordExerciseQuestion.DisplayLabel}（已选中文字）";
+                    DetailText.Text =
+                        $"选择或复制文字期间暂不刷新续写；取消选区后再根据稳定光标更新。{_settingsService.Current.WordExerciseHotkey}：识别/切换光标题目";
+                    if (_lastWordExerciseSuggestion is not null &&
+                        _currentSuggestion.Mode is not SuggestionMode.ExerciseAnswer and
+                            not SuggestionMode.ExerciseContinuation)
+                    {
+                        UpdateSuggestion(_lastWordExerciseSuggestion);
+                    }
+                    return;
+                }
+
+                var questionType = WordExercisePresentation.ToDisplayType(_wordExerciseQuestion.QuestionType);
+                StatusText.Text = $"当前题目：{_wordExerciseQuestion.DisplayLabel}（{questionType}）";
+                DetailText.Text =
+                    $"当前题目由 AI 识别 | 子问：{(string.IsNullOrWhiteSpace(_wordExerciseQuestion.ActiveSubquestionNumber) ? "无" : _wordExerciseQuestion.ActiveSubquestionNumber)} | " +
+                    $"{_settingsService.Current.WordExerciseHotkey}：识别/切换光标题目";
+
+                var observationKey = BuildWordExerciseObservationKey(result);
+                var needsContinuation = !string.Equals(
+                    observationKey,
+                    _wordExerciseLastProcessedStateKey,
+                    StringComparison.Ordinal);
+                if (needsContinuation)
+                {
+                    ScheduleWordExercise(result, WordExerciseRequestMode.ContinueCurrentQuestion, immediate: false);
+                }
+                else if (!_wordExerciseCaretOutsideCurrentQuestion &&
+                         _lastWordExerciseSuggestion is not null &&
+                         _currentSuggestion.Mode is not SuggestionMode.ExerciseAnswer and
+                             not SuggestionMode.ExerciseContinuation)
+                {
+                    UpdateSuggestion(_lastWordExerciseSuggestion);
+                }
+                return;
+            }
+        }
+
+        CancelPredictionForDocumentPreview();
+
+        UpdateSuggestion(new SuggestionResult
+        {
+            Mode = SuggestionMode.Information,
+            DisplayText = IsWordDocument(result) && result.Status == DocumentContextStatus.Captured
+                ? DocumentContextFormatter.BuildTaskbarText(result) +
+                  $" ｜ {_settingsService.Current.WordExerciseHotkey}识别题目"
+                : DocumentContextFormatter.BuildTaskbarText(result),
+            Explanation = string.IsNullOrWhiteSpace(result.Diagnostics)
+                ? result.Message
+                : $"{result.Message} {result.Diagnostics}"
+        });
+    }
+
+    private void CancelPredictionForDocumentPreview()
+    {
+        _predictionCancellation?.Cancel();
+        _predictionCancellation?.Dispose();
+        _predictionCancellation = null;
+        _predictionInFlightContext = null;
+        _lastPredictionContext = null;
+        _manualCandidateContext = null;
+        _suggestionAcceptance = null;
+        _lastExerciseRequestContext = null;
+        _exerciseInFlightContext = null;
+        _exerciseSuggestionAcceptance = null;
+    }
+
+    private void ScheduleWordExercise(
+        DocumentContextResult document,
+        WordExerciseRequestMode mode,
+        bool immediate)
+    {
+        if (!document.CaretAvailable || document.CaretOffset is not int caretOffset)
+        {
+            if (mode == WordExerciseRequestMode.LocateAndAnswer)
+            {
+                _wordExerciseLocateRequested = false;
+                UpdateSuggestion(SuggestionResult.Error(
+                    "无法识别当前题目",
+                    "Word 暂未提供可靠光标，请单击题干后重试。"));
+            }
+            return;
+        }
+
+        var questionIdentity = _wordExerciseQuestion?.QuestionIdentity ?? "locating";
+        var modeKey = mode == WordExerciseRequestMode.LocateAndAnswer ? "locate" : "continue";
+        var contextKey = $"word_exercise|{modeKey}|{document.DocumentIdentity}|{document.ContentHash}|" +
+                         $"{caretOffset}|{questionIdentity}";
+        var previousSuggestion = _lastWordExerciseSuggestion?.InsertText ?? _currentSuggestion.InsertText;
+        if (string.Equals(contextKey, _exerciseInFlightContext, StringComparison.Ordinal) ||
+            string.Equals(contextKey, _lastExerciseRequestContext, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (mode == WordExerciseRequestMode.ContinueCurrentQuestion)
+        {
+            var currentProbe = new ProbeResult
+            {
+                Text = document.Text,
+                CaretOffset = caretOffset
+            };
+            var progress = SuggestionAcceptanceMatcher.Match(
+                _exerciseSuggestionAcceptance,
+                currentProbe);
+            if (progress.IsFollowing)
+            {
+                UpdateFollowingWordExerciseSuggestion(progress);
+                if (!progress.IsComplete)
+                {
+                    ResetExerciseRequestState(cancelRequest: true, clearAcceptance: false);
+                    _lastExerciseRequestContext = contextKey;
+                    _wordExerciseLastProcessedStateKey = BuildWordExerciseObservationKey(document);
+                    return;
+                }
+            }
+        }
+
+        if (!_settingsService.Current.AiEnabled)
+        {
+            if (mode == WordExerciseRequestMode.LocateAndAnswer)
+            {
+                _wordExerciseLocateRequested = false;
+                UpdateSuggestion(SuggestionResult.Info("AI 已关闭，无法识别当前题目"));
+            }
+            else
+            {
+                _wordExerciseLastProcessedStateKey = BuildWordExerciseObservationKey(document);
+                HandleWordExerciseFailure(mode, "AI 已关闭，暂不更新当前题目的续写。", preserveAnswer: true);
+            }
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(_apiKey))
+        {
+            if (mode == WordExerciseRequestMode.LocateAndAnswer)
+            {
+                _wordExerciseLocateRequested = false;
+                UpdateSuggestion(SuggestionResult.Info("请先保存 DeepSeek API Key，再识别 Word 题目"));
+            }
+            else
+            {
+                _wordExerciseLastProcessedStateKey = BuildWordExerciseObservationKey(document);
+                HandleWordExerciseFailure(mode, "DeepSeek API Key 不可用，暂不更新当前题目的续写。", preserveAnswer: true);
+            }
+            return;
+        }
+
+        _exerciseSuggestionAcceptance = null;
+        _suggestionAcceptance = null;
+        _lastPredictionContext = null;
+        _predictionInFlightContext = null;
+        _lastExerciseRequestContext = contextKey;
+        _predictionCancellation?.Cancel();
+        _predictionCancellation?.Dispose();
+        _predictionCancellation = new CancellationTokenSource();
+        _exerciseInFlightContext = contextKey;
+
+        if (mode == WordExerciseRequestMode.LocateAndAnswer)
+        {
+            UpdateSuggestion(SuggestionResult.Loading("正在识别光标所在题目……"));
+        }
+        else
+        {
+            StatusText.Text = $"当前题目：{_wordExerciseQuestion?.DisplayLabel ?? "当前题"}，正在更新续写";
+        }
+
+        RunWordExerciseAsync(
+            document,
+            contextKey,
+            mode,
+            immediate,
+            previousSuggestion,
+            _predictionCancellation.Token).Forget();
+    }
+
+    private async Task RunWordExerciseAsync(
+        DocumentContextResult document,
+        string contextKey,
+        WordExerciseRequestMode mode,
+        bool immediate,
+        string previousSuggestion,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var delay = immediate ? 0 : _settingsService.Current.PredictionDebounceMilliseconds;
+            if (!immediate)
+            {
+                var earliest = _lastCompletionRequestStarted.AddMilliseconds(
+                    _settingsService.Current.PredictionMinimumIntervalMilliseconds);
+                var intervalDelay = (int)Math.Ceiling((earliest - DateTimeOffset.UtcNow).TotalMilliseconds);
+                delay = Math.Max(delay, Math.Max(0, intervalDelay));
+            }
+            if (delay > 0)
+            {
+                await Task.Delay(delay, cancellationToken);
+            }
+
+            int[] radii =
+            [
+                WordExerciseContextBuilder.InitialRadius,
+                WordExerciseContextBuilder.FirstExpandedRadius,
+                WordExerciseContextBuilder.FinalExpandedRadius
+            ];
+            SuggestionResult? result = null;
+            WordExerciseRequestContext? requestContext = null;
+            string? locateValidationError = null;
+            for (var attempt = 0; attempt < radii.Length; attempt++)
+            {
+                requestContext = WordExerciseContextBuilder.Build(
+                    document,
+                    mode,
+                    radii[attempt],
+                    attempt,
+                    mode == WordExerciseRequestMode.ContinueCurrentQuestion ? _wordExerciseQuestion : null,
+                    previousSuggestion);
+                if (requestContext is null)
+                {
+                    HandleWordExerciseFailure(mode, "Word 当前没有可靠正文或光标。", preserveAnswer: true);
+                    return;
+                }
+
+                _lastCompletionRequestStarted = DateTimeOffset.UtcNow;
+                var stopwatch = Stopwatch.StartNew();
+                result = await _deepSeekClient.CompleteAsync(
+                    _settingsService.Current,
+                    _apiKey!,
+                    PromptTemplates.BuildWordExercisePrompt(requestContext),
+                    cancellationToken,
+                    maxTokens: 3000,
+                    temperature: 0.1,
+                    systemPrompt: PromptTemplates.BuildExerciseSystemPrompt(_settingsService.Current));
+                stopwatch.Stop();
+
+                if (cancellationToken.IsCancellationRequested ||
+                    !IsCurrentWordExerciseRequest(document, contextKey))
+                {
+                    return;
+                }
+
+                _logger.WriteSuggestion(
+                    mode == WordExerciseRequestMode.LocateAndAnswer
+                        ? $"word_exercise_locate_{radii[attempt]}"
+                        : $"word_exercise_continue_{radii[attempt]}",
+                    requestContext.ContextCharacterCount,
+                    stopwatch.ElapsedMilliseconds,
+                    result,
+                    requestContext);
+                if (result.Mode == SuggestionMode.Error)
+                {
+                    HandleWordExerciseFailure(mode, result.DisplayText, preserveAnswer: true);
+                    return;
+                }
+
+                if (mode == WordExerciseRequestMode.LocateAndAnswer &&
+                    !result.IsQuestion &&
+                    result.ContextComplete)
+                {
+                    locateValidationError = "当前内容不像 SQL 数据库练习题。";
+                    break;
+                }
+
+                var needsExpansion = WordExerciseContextBuilder.NeedsExpandedContext(requestContext, result);
+                if (mode == WordExerciseRequestMode.LocateAndAnswer && !needsExpansion)
+                {
+                    if (WordExerciseContextBuilder.TryCreateQuestionState(
+                            document,
+                            requestContext,
+                            result,
+                            string.IsNullOrEmpty(_wordExerciseBaselineText)
+                                ? document.Text
+                                : _wordExerciseBaselineText,
+                            out var locatedQuestion,
+                            out locateValidationError))
+                    {
+                        _wordExerciseQuestion = locatedQuestion;
+                        break;
+                    }
+                    needsExpansion = true;
+                }
+
+                if (!needsExpansion || attempt == radii.Length - 1)
+                {
+                    break;
+                }
+
+                if (mode == WordExerciseRequestMode.LocateAndAnswer)
+                {
+                    UpdateSuggestion(SuggestionResult.Loading("题目可能超出当前窗口，正在扩大范围……"));
+                }
+                else
+                {
+                    StatusText.Text = $"当前题目：{_wordExerciseQuestion?.DisplayLabel ?? "当前题"}，正在扩大续写上下文";
+                }
+            }
+
+            if (result is null || requestContext is null)
+            {
+                HandleWordExerciseFailure(mode, "没有取得有效的题目识别结果。", preserveAnswer: true);
+                return;
+            }
+
+            if (!IsCurrentWordExerciseRequest(document, contextKey))
+            {
+                return;
+            }
+
+            if (mode == WordExerciseRequestMode.LocateAndAnswer)
+            {
+                if (_wordExerciseQuestion is null)
+                {
+                    _wordExerciseLocateRequested = false;
+                    var failure = !result.IsQuestion
+                        ? "当前内容不像 SQL 数据库练习题。"
+                        : locateValidationError ?? "未完整识别题目，请把光标移到题干或选中完整题目后重试。";
+                    HandleWordExerciseFailure(mode, failure, preserveAnswer: false);
+                    return;
+                }
+                _wordExerciseLocateRequested = false;
+                _wordExerciseCaretOutsideCurrentQuestion = false;
+            }
+            else
+            {
+                if (_wordExerciseQuestion is null)
+                {
+                    return;
+                }
+                if (!result.SameAsCurrentQuestion)
+                {
+                    _wordExerciseLastProcessedStateKey = BuildWordExerciseObservationKey(document);
+                    _wordExerciseCaretOutsideCurrentQuestion = true;
+                    var switchHint =
+                        $"当前仍是 {_wordExerciseQuestion.DisplayLabel}；如已进入新题，请按 {_settingsService.Current.WordExerciseHotkey}";
+                    UpdateSuggestion(_lastWordExerciseSuggestion is null
+                        ? SuggestionResult.Info(switchHint)
+                        : _lastWordExerciseSuggestion with
+                        {
+                            Mode = SuggestionMode.ExerciseContinuation,
+                            DisplayText = switchHint,
+                            InsertText = string.Empty,
+                            Explanation = switchHint,
+                            SameAsCurrentQuestion = false
+                        });
+                    return;
+                }
+
+                if (WordExerciseContextBuilder.NeedsExpandedContext(requestContext, result) ||
+                    !result.IsQuestion ||
+                    result.Mode != SuggestionMode.ExerciseContinuation ||
+                    result.Confidence < WordExerciseContextBuilder.MinimumExerciseConfidence)
+                {
+                    HandleWordExerciseFailure(
+                        mode,
+                        "当前上下文不足以生成可靠续写，已保留上一条答案。",
+                        preserveAnswer: true);
+                    return;
+                }
+
+                _wordExerciseCaretOutsideCurrentQuestion = false;
+
+                _wordExerciseQuestion = _wordExerciseQuestion with
+                {
+                    ActiveSubquestionNumber = string.IsNullOrWhiteSpace(result.ActiveSubquestionNumber)
+                        ? _wordExerciseQuestion.ActiveSubquestionNumber
+                        : WordExerciseContextBuilder.NormalizeSubquestionNumber(result.ActiveSubquestionNumber),
+                    QuestionType = result.QuestionType == "unknown" || string.IsNullOrWhiteSpace(result.QuestionType)
+                        ? _wordExerciseQuestion.QuestionType
+                        : WordExerciseContextBuilder.NormalizeQuestionType(result.QuestionType)
+                };
+            }
+
+            var question = _wordExerciseQuestion!;
+            var expectedMode = mode == WordExerciseRequestMode.LocateAndAnswer
+                ? SuggestionMode.ExerciseAnswer
+                : SuggestionMode.ExerciseContinuation;
+            var questionType = result.QuestionType == "unknown" || string.IsNullOrWhiteSpace(result.QuestionType)
+                ? question.QuestionType
+                : WordExerciseContextBuilder.NormalizeQuestionType(result.QuestionType);
+            var fullAnswer = string.IsNullOrWhiteSpace(result.FullAnswer)
+                ? mode == WordExerciseRequestMode.ContinueCurrentQuestion &&
+                  !string.IsNullOrWhiteSpace(_lastWordExerciseSuggestion?.FullAnswer)
+                    ? _lastWordExerciseSuggestion.FullAnswer
+                    : string.IsNullOrWhiteSpace(result.InsertText) ? result.DisplayText : result.InsertText
+                : result.FullAnswer;
+            var insertText = mode == WordExerciseRequestMode.LocateAndAnswer && string.IsNullOrWhiteSpace(result.InsertText)
+                ? fullAnswer
+                : result.InsertText;
+            var answerForTaskbar = WordExercisePresentation.SelectTaskbarAnswer(
+                result,
+                questionType,
+                fullAnswer,
+                insertText,
+                mode == WordExerciseRequestMode.ContinueCurrentQuestion);
+            var displayText = WordExercisePresentation.BuildDisplayText(
+                answerForTaskbar,
+                insertText,
+                questionType,
+                question.QuestionNumber,
+                mode == WordExerciseRequestMode.ContinueCurrentQuestion);
+            var modeHint =
+                $"当前题目：{question.DisplayLabel}；按 {_settingsService.Current.WordExerciseHotkey} 识别或切换到光标所在新题。";
+            result = result with
+            {
+                Mode = expectedMode,
+                DisplayText = displayText,
+                InsertText = insertText,
+                FullAnswer = fullAnswer,
+                QuestionType = questionType,
+                QuestionNumber = question.QuestionNumber,
+                ActiveSubquestionNumber = question.ActiveSubquestionNumber,
+                QuestionText = question.QuestionText,
+                Explanation = string.IsNullOrWhiteSpace(result.Explanation)
+                    ? modeHint
+                    : result.Explanation.Trim() + Environment.NewLine + Environment.NewLine + modeHint
+            };
+
+            _exerciseSuggestionAcceptance = string.IsNullOrWhiteSpace(insertText)
+                ? null
+                : new SuggestionAcceptanceState(
+                    document.Text,
+                    Math.Clamp(document.CaretOffset ?? document.Text.Length, 0, document.Text.Length),
+                    insertText);
+            _wordExerciseLastProcessedStateKey = BuildWordExerciseObservationKey(document);
+            _lastWordExerciseSuggestion = result;
+            UpdateSuggestion(result);
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer Word edit, caret move or application switch superseded this request.
+        }
+        catch (Exception ex)
+        {
+            _logger.WriteDiagnostic("word_exercise", ex.ToString());
+            if (IsCurrentWordExerciseRequest(document, contextKey))
+            {
+                HandleWordExerciseFailure(
+                    mode,
+                    $"题目处理发生异常：{ex.Message}",
+                    preserveAnswer: mode == WordExerciseRequestMode.ContinueCurrentQuestion);
+            }
+        }
+        finally
+        {
+            if (string.Equals(_exerciseInFlightContext, contextKey, StringComparison.Ordinal))
+            {
+                _exerciseInFlightContext = null;
+            }
+        }
+    }
+
+    private async Task IdentifyWordExerciseAsync()
+    {
+        if (!_settingsService.Current.AssistantEnabled)
+        {
+            UpdateSuggestion(SuggestionResult.Info(
+                $"Assistant 已关闭；按 {_settingsService.Current.ToggleAssistantHotkey} 开启"));
+            return;
+        }
+
+        DocumentContextResult document;
+        try
+        {
+            document = await _documentContextProbeService.CaptureForegroundAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.WriteDiagnostic("word_exercise_hotkey", ex.ToString());
+            UpdateSuggestion(SuggestionResult.Error("无法识别当前题目", "读取 Word 正文或光标时发生异常。"));
+            return;
+        }
+        if (document.Status != DocumentContextStatus.Captured || !IsWordDocument(document))
+        {
+            UpdateSuggestion(SuggestionResult.Error(
+                "无法识别当前题目",
+                "请先把文本光标放到 Word 的一道 SQL 数据库练习题内，再按识别快捷键。"));
+            return;
+        }
+        if (!document.CaretAvailable)
+        {
+            UpdateSuggestion(SuggestionResult.Error(
+                "无法识别当前题目",
+                "Word 暂未提供可靠光标，请单击题干、选项或答案后重试。"));
+            return;
+        }
+        if (!_settingsService.Current.AiEnabled)
+        {
+            UpdateSuggestion(SuggestionResult.Info("AI 已关闭，无法识别当前题目"));
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(_apiKey))
+        {
+            UpdateSuggestion(SuggestionResult.Info("请先保存 DeepSeek API Key，再识别 Word 题目"));
+            return;
+        }
+
+        ResetExerciseRequestState(cancelRequest: true);
+        _wordExerciseQuestion = null;
+        _lastWordExerciseSuggestion = null;
+        _wordExerciseBaselineText = document.Text;
+        _wordExercisePendingDocumentIdentity = document.DocumentIdentity;
+        _wordExerciseLastProcessedStateKey = null;
+        _wordExerciseCaretOutsideCurrentQuestion = false;
+        _wordExerciseLocateRequested = true;
+        _forceNextExerciseRequest = true;
+        ApplyDocumentContextResult(document);
+    }
+
+    private void UpdateFollowingWordExerciseSuggestion(SuggestionAcceptanceProgress progress)
+    {
+        if (_lastWordExerciseSuggestion is null || _wordExerciseQuestion is null)
+        {
+            return;
+        }
+
+        var updated = WordExercisePresentation.AdvanceFollowingSuggestion(
+            _lastWordExerciseSuggestion,
+            _wordExerciseQuestion,
+            progress);
+        _lastWordExerciseSuggestion = updated;
+        UpdateSuggestion(updated);
+    }
+
+    private void HandleWordExerciseFailure(
+        WordExerciseRequestMode mode,
+        string message,
+        bool preserveAnswer)
+    {
+        if (mode == WordExerciseRequestMode.LocateAndAnswer)
+        {
+            _wordExerciseLocateRequested = false;
+            if (_wordExerciseQuestion is null)
+            {
+                _wordExerciseBaselineText = string.Empty;
+                _wordExercisePendingDocumentIdentity = string.Empty;
+                _wordExerciseLastProcessedStateKey = null;
+            }
+        }
+        if (preserveAnswer && _lastWordExerciseSuggestion is not null)
+        {
+            _lastWordExerciseSuggestion = _lastWordExerciseSuggestion with
+            {
+                Explanation = $"本次更新失败，已保留上一条答案：{message}"
+            };
+            UpdateSuggestion(_lastWordExerciseSuggestion);
+            return;
+        }
+        UpdateSuggestion(SuggestionResult.Error("未能识别或回答当前题目", message));
+    }
+
+    private void ResetExerciseRequestState(bool cancelRequest, bool clearAcceptance = true)
+    {
+        if (cancelRequest)
+        {
+            _predictionCancellation?.Cancel();
+            _predictionCancellation?.Dispose();
+            _predictionCancellation = null;
+        }
+        _lastExerciseRequestContext = null;
+        _exerciseInFlightContext = null;
+        if (clearAcceptance)
+        {
+            _exerciseSuggestionAcceptance = null;
+        }
+    }
+
+    private void LeaveExerciseRequestIfActive()
+    {
+        if (_lastExerciseRequestContext is not null ||
+            _exerciseInFlightContext is not null ||
+            _exerciseSuggestionAcceptance is not null)
+        {
+            ResetExerciseRequestState(cancelRequest: true);
+        }
+    }
+
+    private void PrepareForWordExerciseMode()
+    {
+        if (_exerciseInFlightContext is null && _predictionCancellation is not null)
+        {
+            _predictionCancellation?.Cancel();
+            _predictionCancellation?.Dispose();
+            _predictionCancellation = null;
+        }
+        _predictionInFlightContext = null;
+        _lastPredictionContext = null;
+        _manualCandidateContext = null;
+        _manualCandidateRequestProbeKey = null;
+        _suggestionAcceptance = null;
+    }
+
+    private void ClearWordExerciseSession(bool cancelRequest)
+    {
+        ResetExerciseRequestState(cancelRequest);
+        _wordExerciseQuestion = null;
+        _lastWordExerciseSuggestion = null;
+        _wordExerciseLocateRequested = false;
+        _wordExerciseBaselineText = string.Empty;
+        _wordExercisePendingDocumentIdentity = string.Empty;
+        _wordExerciseLastProcessedStateKey = null;
+        _wordExerciseCaretOutsideCurrentQuestion = false;
+        _forceNextExerciseRequest = false;
+    }
+
+    private static bool IsWordDocument(DocumentContextResult result)
+        => result.ProcessName.Equals("WINWORD", StringComparison.OrdinalIgnoreCase);
+
+    private static string BuildWordExerciseObservationKey(DocumentContextResult document) =>
+        $"{document.DocumentIdentity}|{document.ContentHash}|{document.CaretOffset}";
+
+    private bool IsCurrentWordExerciseRequest(DocumentContextResult requestedDocument, string contextKey)
+    {
+        var current = _lastDocumentContext;
+        return _settingsService.Current.AssistantEnabled &&
+               string.Equals(contextKey, _lastExerciseRequestContext, StringComparison.Ordinal) &&
+               current is not null &&
+               current.Status == DocumentContextStatus.Captured &&
+               IsWordDocument(current) &&
+               WordExerciseContextBuilder.IsSameObservation(requestedDocument, current);
+    }
+
     private void ApplyProbeResult(ProbeResult result)
     {
         var stateKey = $"{result.Status}|{result.ProcessId}|{result.Source}|{result.Message}|{result.CaretOffset}";
@@ -157,6 +883,7 @@ public partial class MainWindow : Window
         switch (result.Status)
         {
             case ProbeStatus.Captured:
+                LeaveExerciseRequestIfActive();
                 _keyboardFallbackService.Stop();
                 _fallbackSessionInitialized = false;
                 _fallbackText.Clear();
@@ -205,6 +932,7 @@ public partial class MainWindow : Window
                 break;
 
             case ProbeStatus.NavicatNotForeground:
+                LeaveExerciseRequestIfActive();
                 FlushPendingCaptureLog(force: true);
                 _keyboardFallbackService.Stop();
                 if (stateChanged)
@@ -217,6 +945,7 @@ public partial class MainWindow : Window
                 break;
 
             case ProbeStatus.NoReadableText:
+                LeaveExerciseRequestIfActive();
                 FlushPendingCaptureLog(force: true);
                 _keyboardFallbackService.CaptureEnabled =
                     _settingsService.Current.KeyboardFallbackEnabled && _keyboardFallbackService.Start();
@@ -233,6 +962,7 @@ public partial class MainWindow : Window
                 break;
 
             default:
+                LeaveExerciseRequestIfActive();
                 FlushPendingCaptureLog(force: true);
                 _keyboardFallbackService.Stop();
                 if (stateChanged)
@@ -625,6 +1355,10 @@ public partial class MainWindow : Window
         {
             _suggestionAcceptance = null;
         }
+        if (suggestion.Mode is not SuggestionMode.ExerciseAnswer and not SuggestionMode.ExerciseContinuation)
+        {
+            _exerciseSuggestionAcceptance = null;
+        }
 
         _currentSuggestion = suggestion;
         if (IsVisible)
@@ -652,6 +1386,8 @@ public partial class MainWindow : Window
         {
             SuggestionMode.Completion => "补全",
             SuggestionMode.Diagnosis => "诊断",
+            SuggestionMode.ExerciseAnswer => "题目回答",
+            SuggestionMode.ExerciseContinuation => "题目续写",
             SuggestionMode.Error => "错误",
             _ => "状态"
         };
@@ -662,16 +1398,33 @@ public partial class MainWindow : Window
         SuggestionInsertTextBox.Text = string.IsNullOrWhiteSpace(suggestion.InsertText) ? "—" : suggestion.InsertText;
         IssuesText.Text = suggestion.HasCandidates
             ? $"再次按 {_settingsService.Current.CycleCandidatesHotkey} 切换下一个候选；当前为第 {suggestion.ActiveCandidateIndex + 1} 个，共 {suggestion.Candidates.Count} 个。"
-            : suggestion.Issues.Count == 0 ? string.Empty : "问题：" + string.Join("；", suggestion.Issues);
+            : suggestion.Mode == SuggestionMode.ExerciseAnswer
+                ? $"完整题目、答案和解析已同步到手机页；移动到新题后按 {_settingsService.Current.WordExerciseHotkey} 识别并切换，同题再次按下可强制刷新。"
+                : suggestion.Mode == SuggestionMode.ExerciseContinuation
+                    ? suggestion.SameAsCurrentQuestion
+                        ? $"正在跟随当前题目的作答；移动到新题后按 {_settingsService.Current.WordExerciseHotkey} 识别并切换。"
+                        : $"当前题目没有自动切换；请在新题内按 {_settingsService.Current.WordExerciseHotkey}。"
+                    : suggestion.Issues.Count == 0 ? string.Empty : "问题：" + string.Join("；", suggestion.Issues);
     }
 
     private static bool SameSuggestionPayload(SuggestionResult left, SuggestionResult right)
     {
         if (left.Mode != right.Mode || left.IsLoading != right.IsLoading ||
+            left.IsQuestion != right.IsQuestion ||
+            left.ContextComplete != right.ContextComplete ||
+            left.SameAsCurrentQuestion != right.SameAsCurrentQuestion ||
             left.ActiveCandidateIndex != right.ActiveCandidateIndex ||
             !string.Equals(left.DisplayText, right.DisplayText, StringComparison.Ordinal) ||
             !string.Equals(left.InsertText, right.InsertText, StringComparison.Ordinal) ||
             !string.Equals(left.Explanation, right.Explanation, StringComparison.Ordinal) ||
+            !string.Equals(left.QuestionType, right.QuestionType, StringComparison.Ordinal) ||
+            !string.Equals(left.NeedsMoreContext, right.NeedsMoreContext, StringComparison.Ordinal) ||
+            !string.Equals(left.QuestionNumber, right.QuestionNumber, StringComparison.Ordinal) ||
+            !string.Equals(left.ActiveSubquestionNumber, right.ActiveSubquestionNumber, StringComparison.Ordinal) ||
+            !string.Equals(left.QuestionText, right.QuestionText, StringComparison.Ordinal) ||
+            !string.Equals(left.AnswerState, right.AnswerState, StringComparison.Ordinal) ||
+            !string.Equals(left.DetectedUserAnswer, right.DetectedUserAnswer, StringComparison.Ordinal) ||
+            !string.Equals(left.FullAnswer, right.FullAnswer, StringComparison.Ordinal) ||
             !left.Issues.SequenceEqual(right.Issues, StringComparer.Ordinal) ||
             left.Candidates.Count != right.Candidates.Count)
         {
@@ -769,7 +1522,10 @@ public partial class MainWindow : Window
         _probeTimer.Stop();
         _keyboardFallbackService.Stop();
         _predictionCancellation?.Cancel();
+        _predictionCancellation?.Dispose();
+        _predictionCancellation = null;
         _predictionInFlightContext = null;
+        ClearWordExerciseSession(cancelRequest: false);
         _candidateRequestInProgress = false;
         _manualCandidateRequestProbeKey = null;
         FlushPendingCaptureLog(force: true);
@@ -790,12 +1546,13 @@ public partial class MainWindow : Window
         {
             shortcuts[HotkeyAction.CycleCandidates] = settings.CycleCandidatesHotkey;
             shortcuts[HotkeyAction.AnalyzeSelection] = settings.AnalyzeSelectionHotkey;
+            shortcuts[HotkeyAction.IdentifyWordExercise] = settings.WordExerciseHotkey;
         }
 
         var errors = _hotkeyService.Register(new WindowInteropHelper(this).Handle, shortcuts);
         HotkeyStatusText.Text = errors.Count == 0
             ? settings.AssistantEnabled
-                ? $"整体启停：{settings.ToggleAssistantHotkey} | 续写候选：{settings.CycleCandidatesHotkey} | 诊断：{settings.AnalyzeSelectionHotkey}"
+                ? $"整体启停：{settings.ToggleAssistantHotkey} | SQL 候选：{settings.CycleCandidatesHotkey} | SQL 诊断：{settings.AnalyzeSelectionHotkey} | Word 识别/切题：{settings.WordExerciseHotkey}"
                 : $"整体启停：{settings.ToggleAssistantHotkey}（其余快捷键已停用）"
             : string.Join("；", errors);
     }
@@ -809,6 +1566,7 @@ public partial class MainWindow : Window
                 break;
             case HotkeyAction.CycleCandidates: CycleCandidatesAsync().Forget(); break;
             case HotkeyAction.AnalyzeSelection: AnalyzeSelectionAsync(true).Forget(); break;
+            case HotkeyAction.IdentifyWordExercise: IdentifyWordExerciseAsync().Forget(); break;
         }
     }
 
@@ -889,6 +1647,7 @@ public partial class MainWindow : Window
             var settings = _settingsService.Current;
             if (patch.TaskbarPanelEnabled is bool taskbar) settings.TaskbarPanelEnabled = taskbar;
             if (patch.TaskbarWidth is double width) settings.TaskbarWidth = width;
+            if (!string.IsNullOrWhiteSpace(patch.WordExerciseHotkey)) settings.WordExerciseHotkey = patch.WordExerciseHotkey;
             if (patch.TaskbarFontSize is double tf) settings.TaskbarStyle.FontSize = tf;
             if (patch.TaskbarLineHeight is double tl) settings.TaskbarStyle.LineHeight = tl;
             if (!string.IsNullOrWhiteSpace(patch.TaskbarBackgroundColor)) settings.TaskbarStyle.BackgroundColor = patch.TaskbarBackgroundColor;
@@ -913,7 +1672,7 @@ public partial class MainWindow : Window
             _lastPredictionContext = null;
             _predictionInFlightContext = null;
             StatusText.Text = "Assistant 正在恢复探测……";
-            DetailText.Text = "正在读取当前 Navicat SQL 并自动开始分析。";
+            DetailText.Text = $"Navicat SQL 会恢复自动分析；Word 仅恢复读取预览，按 {_settingsService.Current.WordExerciseHotkey} 后才识别题目。";
             StatusDot.Fill = Brush(243, 156, 18);
         }
 
@@ -997,10 +1756,19 @@ public partial class MainWindow : Window
     {
         Show();
         WindowState = WindowState.Normal;
-        if (_sqlViewDirty && _lastCapturedProbe is not null)
+        if (_sqlViewDirty)
         {
-            SqlTextBox.Text = _lastCapturedProbe.Text;
-            _sqlViewDirty = false;
+            if (_lastStateKey?.StartsWith("document|", StringComparison.Ordinal) == true &&
+                _lastDocumentContext is not null)
+            {
+                SqlTextBox.Text = _lastDocumentContext.Text;
+                _sqlViewDirty = false;
+            }
+            else if (_lastCapturedProbe is not null)
+            {
+                SqlTextBox.Text = _lastCapturedProbe.Text;
+                _sqlViewDirty = false;
+            }
         }
         if (_suggestionViewDirty)
         {
@@ -1121,6 +1889,7 @@ public partial class MainWindow : Window
         _predictionCancellation?.Dispose();
         _hotkeyService.Dispose();
         _keyboardFallbackService.Dispose();
+        _documentContextProbeService.Dispose();
         _deepSeekClient.Dispose();
         _trayIcon.Dispose();
         _taskbarWindow.Close();

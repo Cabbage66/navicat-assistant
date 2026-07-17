@@ -28,6 +28,7 @@ public sealed record AppSettings
     public string ToggleAssistantHotkey { get; set; } = "Ctrl+Alt+S";
     public string CycleCandidatesHotkey { get; set; } = "Ctrl+Alt+R";
     public string AnalyzeSelectionHotkey { get; set; } = "Ctrl+Alt+E";
+    public string WordExerciseHotkey { get; set; } = "Ctrl+Alt+A";
     public DisplayStyle TaskbarStyle { get; set; } = new()
     {
         FontSize = 11,
