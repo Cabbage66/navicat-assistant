@@ -10,7 +10,7 @@ public partial class SettingsWindow : Window
 {
     private readonly AppSettings _workingCopy;
 
-    public SettingsWindow(AppSettings settings, bool hasSavedApiKey)
+    public SettingsWindow(AppSettings settings, bool hasSavedApiKey, bool hasSavedVisionApiKey)
     {
         InitializeComponent();
         Icon = Imaging.CreateBitmapSourceFromHIcon(
@@ -21,6 +21,9 @@ public partial class SettingsWindow : Window
         ApiKeyStatusText.Text = hasSavedApiKey
             ? "Windows 凭据管理器中已经保存了一个 API Key。"
             : "尚未保存 API Key。请先撤销聊天中暴露的旧 Key，再在这里填写新 Key。";
+        VisionApiKeyStatusText.Text = hasSavedVisionApiKey
+            ? "Windows 凭据管理器中已经保存了智谱 API Key。"
+            : "尚未保存智谱 API Key。明文暴露过的 Key 必须先在智谱控制台吊销并重建。";
         PopulateControls();
     }
 
@@ -30,11 +33,18 @@ public partial class SettingsWindow : Window
 
     public bool ClearApiKey => ClearApiKeyCheckBox.IsChecked == true;
 
+    public string NewVisionApiKey => VisionApiKeyPasswordBox.Password.Trim();
+
+    public bool ClearVisionApiKey => ClearVisionApiKeyCheckBox.IsChecked == true;
+
     private void PopulateControls()
     {
         AiEnabledCheckBox.IsChecked = _workingCopy.AiEnabled;
         ApiBaseUrlTextBox.Text = _workingCopy.ApiBaseUrl;
         ModelTextBox.Text = _workingCopy.Model;
+        VisionEnabledCheckBox.IsChecked = _workingCopy.VisionEnabled;
+        VisionApiBaseUrlTextBox.Text = _workingCopy.VisionApiBaseUrl;
+        VisionModelTextBox.Text = _workingCopy.VisionModel;
         GlobalPromptTextBox.Text = _workingCopy.CustomGlobalPrompt;
         DebounceTextBox.Text = _workingCopy.PredictionDebounceMilliseconds.ToString();
         MinimumIntervalTextBox.Text = _workingCopy.PredictionMinimumIntervalMilliseconds.ToString();
@@ -61,6 +71,7 @@ public partial class SettingsWindow : Window
         AnalyzeHotkeyTextBox.Text = _workingCopy.AnalyzeSelectionHotkey;
         CandidateHotkeyTextBox.Text = _workingCopy.CycleCandidatesHotkey;
         WordExerciseHotkeyTextBox.Text = _workingCopy.WordExerciseHotkey;
+        VisionScreenshotHotkeyTextBox.Text = _workingCopy.VisionScreenshotHotkey;
     }
 
     private void SaveButton_OnClick(object sender, RoutedEventArgs e)
@@ -83,6 +94,9 @@ public partial class SettingsWindow : Window
         _workingCopy.AiEnabled = AiEnabledCheckBox.IsChecked == true;
         _workingCopy.ApiBaseUrl = ApiBaseUrlTextBox.Text.Trim();
         _workingCopy.Model = ModelTextBox.Text.Trim();
+        _workingCopy.VisionEnabled = VisionEnabledCheckBox.IsChecked == true;
+        _workingCopy.VisionApiBaseUrl = VisionApiBaseUrlTextBox.Text.Trim();
+        _workingCopy.VisionModel = VisionModelTextBox.Text.Trim();
         _workingCopy.CustomGlobalPrompt = GlobalPromptTextBox.Text;
         _workingCopy.PredictionDebounceMilliseconds = debounce;
         _workingCopy.PredictionMinimumIntervalMilliseconds = minimumInterval;
@@ -107,6 +121,7 @@ public partial class SettingsWindow : Window
         _workingCopy.AnalyzeSelectionHotkey = AnalyzeHotkeyTextBox.Text.Trim();
         _workingCopy.CycleCandidatesHotkey = CandidateHotkeyTextBox.Text.Trim();
         _workingCopy.WordExerciseHotkey = WordExerciseHotkeyTextBox.Text.Trim();
+        _workingCopy.VisionScreenshotHotkey = VisionScreenshotHotkeyTextBox.Text.Trim();
 
         UpdatedSettings = _workingCopy;
         DialogResult = true;

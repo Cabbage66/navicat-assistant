@@ -18,9 +18,11 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _probeTimer;
     private readonly NavicatProbeService _probeService = new();
     private readonly DocumentContextProbeService _documentContextProbeService = new();
+    private readonly VisionScreenshotCaptureService _visionScreenshotCaptureService;
     private readonly ProbeLogger _logger;
     private readonly SettingsService _settingsService;
     private readonly DeepSeekClient _deepSeekClient = new();
+    private readonly ZhipuVisionClient _zhipuVisionClient = new();
     private readonly NavicatSelectionService _selectionService = new();
     private readonly GlobalHotkeyService _hotkeyService = new();
     private readonly KeyboardFallbackService _keyboardFallbackService = new();
@@ -31,9 +33,10 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, SuggestionResult> _candidateCache = new(StringComparer.Ordinal);
     private readonly Queue<string> _candidateCacheOrder = new();
     private CancellationTokenSource? _predictionCancellation;
+    private CancellationTokenSource? _visionCancellation;
     private ProbeResult? _lastCapturedProbe;
     private DocumentContextResult? _lastDocumentContext;
-    private SuggestionResult _currentSuggestion = SuggestionResult.Info("等待 Navicat SQL 或 Word 练习题……");
+    private SuggestionResult _currentSuggestion = SuggestionResult.Info("等待 Navicat SQL、Word 练习题或主动截图……");
     private bool _captureInProgress;
     private bool _exitRequested;
     private bool _fallbackSessionInitialized;
@@ -49,6 +52,7 @@ public partial class MainWindow : Window
     private string? _manualCandidateContext;
     private string? _manualCandidateRequestProbeKey;
     private string? _apiKey;
+    private string? _visionApiKey;
     private SuggestionAcceptanceState? _suggestionAcceptance;
     private SuggestionAcceptanceState? _exerciseSuggestionAcceptance;
     private WordExerciseQuestionState? _wordExerciseQuestion;
@@ -64,6 +68,8 @@ public partial class MainWindow : Window
     private string? _lastExerciseRequestContext;
     private string? _exerciseInFlightContext;
     private bool _candidateRequestInProgress;
+    private bool _visionRequestInProgress;
+    private long _visionRequestSequence;
 
     public MainWindow()
     {
@@ -75,8 +81,10 @@ public partial class MainWindow : Window
         var assistantRoot = WorkspacePaths.FindAssistantRoot();
         _logger = new ProbeLogger(Path.Combine(assistantRoot, "logs"));
         _settingsService = new SettingsService(assistantRoot);
+        _visionScreenshotCaptureService = new VisionScreenshotCaptureService(_documentContextProbeService);
         _trayIcon = new TrayIconService();
         _apiKey = SafeReadApiKey();
+        _visionApiKey = SafeReadVisionApiKey();
 
         LogPathText.Text = $"日志：{Path.GetFileName(_logger.LogPath)}";
         _probeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(550) };
@@ -131,7 +139,7 @@ public partial class MainWindow : Window
 
     private async Task CaptureNowAsync(bool forceRefresh)
     {
-        if (!_settingsService.Current.AssistantEnabled || _captureInProgress)
+        if (!_settingsService.Current.AssistantEnabled || _captureInProgress || _visionRequestInProgress)
         {
             return;
         }
@@ -1269,6 +1277,142 @@ public partial class MainWindow : Window
         return $"{contentHash}|{probe.CaretOffset ?? probe.Text.Length}";
     }
 
+    private async Task CaptureVisionExerciseAsync()
+    {
+        if (!_settingsService.Current.AssistantEnabled)
+        {
+            UpdateSuggestion(SuggestionResult.Info(
+                $"Assistant 已关闭；按 {_settingsService.Current.ToggleAssistantHotkey} 开启"));
+            return;
+        }
+        if (!_settingsService.Current.VisionEnabled)
+        {
+            UpdateSuggestion(SuggestionResult.Info("截图识题已在设置中关闭"));
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(_visionApiKey))
+        {
+            UpdateSuggestion(SuggestionResult.Info("请先在设置中保存新的智谱 API Key"));
+            return;
+        }
+
+        CancelVisionRequest();
+        _predictionCancellation?.Cancel();
+        _predictionCancellation?.Dispose();
+        _predictionCancellation = null;
+        _predictionInFlightContext = null;
+        _candidateRequestInProgress = false;
+        _manualCandidateRequestProbeKey = null;
+
+        var requestSequence = Interlocked.Increment(ref _visionRequestSequence);
+        _visionCancellation = new CancellationTokenSource();
+        var token = _visionCancellation.Token;
+        _visionRequestInProgress = true;
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var capture = await _visionScreenshotCaptureService.CaptureAsync(token);
+            if (token.IsCancellationRequested || requestSequence != Volatile.Read(ref _visionRequestSequence))
+            {
+                return;
+            }
+
+            _logger.WriteVisionCapture(capture, stopwatch.ElapsedMilliseconds);
+            if (!capture.IsCaptured)
+            {
+                UpdateSuggestion(SuggestionResult.Error("无法截图识别当前题目", capture.Message));
+                return;
+            }
+
+            UpdateSuggestion(SuggestionResult.Loading("正在识别截图中光标所在题目……"));
+            var result = await _zhipuVisionClient.AnswerExerciseAsync(
+                _settingsService.Current,
+                _visionApiKey,
+                capture,
+                token);
+            if (token.IsCancellationRequested || requestSequence != Volatile.Read(ref _visionRequestSequence))
+            {
+                return;
+            }
+
+            if (result.Mode == SuggestionMode.ExerciseAnswer)
+            {
+                if (result.Confidence < WordExerciseContextBuilder.MinimumExerciseConfidence ||
+                    string.Equals(result.AnswerState, "uncertain", StringComparison.OrdinalIgnoreCase))
+                {
+                    result = SuggestionResult.Error(
+                        "截图中的题目或作答位置不够清晰",
+                        string.IsNullOrWhiteSpace(result.Explanation)
+                            ? "请放大题目、确认文本光标可见后重新截图。"
+                            : result.Explanation) with
+                    {
+                        Origin = "vision_screenshot",
+                        Confidence = result.Confidence
+                    };
+                }
+                else
+                {
+                    var continuation = string.Equals(
+                        result.AnswerState,
+                        "partial",
+                        StringComparison.OrdinalIgnoreCase);
+                    var taskbarAnswer = WordExercisePresentation.SelectTaskbarAnswer(
+                        result,
+                        result.QuestionType,
+                        result.FullAnswer,
+                        result.InsertText,
+                        continuation);
+                    result = result with
+                    {
+                        DisplayText = WordExercisePresentation.BuildDisplayText(
+                            taskbarAnswer,
+                            result.InsertText,
+                            result.QuestionType,
+                            result.QuestionNumber,
+                            continuation)
+                    };
+                }
+            }
+
+            _logger.WriteSuggestion(
+                "vision_screenshot",
+                0,
+                stopwatch.ElapsedMilliseconds,
+                result);
+            UpdateSuggestion(result);
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer manual request or the global switch superseded this capture.
+        }
+        catch (Exception ex)
+        {
+            _logger.WriteDiagnostic("vision_screenshot", ex.ToString());
+            if (requestSequence == Volatile.Read(ref _visionRequestSequence))
+            {
+                UpdateSuggestion(SuggestionResult.Error("截图识题发生异常", ex.Message));
+            }
+        }
+        finally
+        {
+            if (requestSequence == Volatile.Read(ref _visionRequestSequence))
+            {
+                _visionCancellation?.Dispose();
+                _visionCancellation = null;
+                _visionRequestInProgress = false;
+            }
+        }
+    }
+
+    private void CancelVisionRequest()
+    {
+        Interlocked.Increment(ref _visionRequestSequence);
+        _visionCancellation?.Cancel();
+        _visionCancellation?.Dispose();
+        _visionCancellation = null;
+        _visionRequestInProgress = false;
+    }
+
     private async Task AnalyzeSelectionAsync(bool copyFromNavicat)
     {
         if (!_settingsService.Current.AssistantEnabled)
@@ -1398,6 +1542,8 @@ public partial class MainWindow : Window
         SuggestionInsertTextBox.Text = string.IsNullOrWhiteSpace(suggestion.InsertText) ? "—" : suggestion.InsertText;
         IssuesText.Text = suggestion.HasCandidates
             ? $"再次按 {_settingsService.Current.CycleCandidatesHotkey} 切换下一个候选；当前为第 {suggestion.ActiveCandidateIndex + 1} 个，共 {suggestion.Candidates.Count} 个。"
+            : string.Equals(suggestion.Origin, "vision_screenshot", StringComparison.Ordinal)
+                ? $"视觉截图结果；把光标放到其他题目后按 {_settingsService.Current.VisionScreenshotHotkey} 可重新识别。"
             : suggestion.Mode == SuggestionMode.ExerciseAnswer
                 ? $"完整题目、答案和解析已同步到手机页；移动到新题后按 {_settingsService.Current.WordExerciseHotkey} 识别并切换，同题再次按下可强制刷新。"
                 : suggestion.Mode == SuggestionMode.ExerciseContinuation
@@ -1410,6 +1556,7 @@ public partial class MainWindow : Window
     private static bool SameSuggestionPayload(SuggestionResult left, SuggestionResult right)
     {
         if (left.Mode != right.Mode || left.IsLoading != right.IsLoading ||
+            !string.Equals(left.Origin, right.Origin, StringComparison.Ordinal) ||
             left.IsQuestion != right.IsQuestion ||
             left.ContextComplete != right.ContextComplete ||
             left.SameAsCurrentQuestion != right.SameAsCurrentQuestion ||
@@ -1521,6 +1668,7 @@ public partial class MainWindow : Window
     {
         _probeTimer.Stop();
         _keyboardFallbackService.Stop();
+        CancelVisionRequest();
         _predictionCancellation?.Cancel();
         _predictionCancellation?.Dispose();
         _predictionCancellation = null;
@@ -1547,18 +1695,26 @@ public partial class MainWindow : Window
             shortcuts[HotkeyAction.CycleCandidates] = settings.CycleCandidatesHotkey;
             shortcuts[HotkeyAction.AnalyzeSelection] = settings.AnalyzeSelectionHotkey;
             shortcuts[HotkeyAction.IdentifyWordExercise] = settings.WordExerciseHotkey;
+            if (settings.VisionEnabled)
+            {
+                shortcuts[HotkeyAction.CaptureVisionExercise] = settings.VisionScreenshotHotkey;
+            }
         }
 
         var errors = _hotkeyService.Register(new WindowInteropHelper(this).Handle, shortcuts);
         HotkeyStatusText.Text = errors.Count == 0
             ? settings.AssistantEnabled
-                ? $"整体启停：{settings.ToggleAssistantHotkey} | SQL 候选：{settings.CycleCandidatesHotkey} | SQL 诊断：{settings.AnalyzeSelectionHotkey} | Word 识别/切题：{settings.WordExerciseHotkey}"
+                ? $"整体启停：{settings.ToggleAssistantHotkey} | SQL 候选：{settings.CycleCandidatesHotkey} | SQL 诊断：{settings.AnalyzeSelectionHotkey} | Word 识别/切题：{settings.WordExerciseHotkey} | 截图识题：{settings.VisionScreenshotHotkey}"
                 : $"整体启停：{settings.ToggleAssistantHotkey}（其余快捷键已停用）"
             : string.Join("；", errors);
     }
 
     private void HotkeyService_OnPressed(object? sender, HotkeyAction action)
     {
+        if (action is not HotkeyAction.CaptureVisionExercise and not HotkeyAction.ToggleAssistant)
+        {
+            CancelVisionRequest();
+        }
         switch (action)
         {
             case HotkeyAction.ToggleAssistant:
@@ -1567,6 +1723,7 @@ public partial class MainWindow : Window
             case HotkeyAction.CycleCandidates: CycleCandidatesAsync().Forget(); break;
             case HotkeyAction.AnalyzeSelection: AnalyzeSelectionAsync(true).Forget(); break;
             case HotkeyAction.IdentifyWordExercise: IdentifyWordExerciseAsync().Forget(); break;
+            case HotkeyAction.CaptureVisionExercise: CaptureVisionExerciseAsync().Forget(); break;
         }
     }
 
@@ -1646,8 +1803,12 @@ public partial class MainWindow : Window
         {
             var settings = _settingsService.Current;
             if (patch.TaskbarPanelEnabled is bool taskbar) settings.TaskbarPanelEnabled = taskbar;
+            if (patch.VisionEnabled is bool visionEnabled) settings.VisionEnabled = visionEnabled;
+            if (!string.IsNullOrWhiteSpace(patch.VisionApiBaseUrl)) settings.VisionApiBaseUrl = patch.VisionApiBaseUrl;
+            if (!string.IsNullOrWhiteSpace(patch.VisionModel)) settings.VisionModel = patch.VisionModel;
             if (patch.TaskbarWidth is double width) settings.TaskbarWidth = width;
             if (!string.IsNullOrWhiteSpace(patch.WordExerciseHotkey)) settings.WordExerciseHotkey = patch.WordExerciseHotkey;
+            if (!string.IsNullOrWhiteSpace(patch.VisionScreenshotHotkey)) settings.VisionScreenshotHotkey = patch.VisionScreenshotHotkey;
             if (patch.TaskbarFontSize is double tf) settings.TaskbarStyle.FontSize = tf;
             if (patch.TaskbarLineHeight is double tl) settings.TaskbarStyle.LineHeight = tl;
             if (!string.IsNullOrWhiteSpace(patch.TaskbarBackgroundColor)) settings.TaskbarStyle.BackgroundColor = patch.TaskbarBackgroundColor;
@@ -1672,7 +1833,7 @@ public partial class MainWindow : Window
             _lastPredictionContext = null;
             _predictionInFlightContext = null;
             StatusText.Text = "Assistant 正在恢复探测……";
-            DetailText.Text = $"Navicat SQL 会恢复自动分析；Word 仅恢复读取预览，按 {_settingsService.Current.WordExerciseHotkey} 后才识别题目。";
+            DetailText.Text = $"Navicat SQL 会恢复自动分析；Word 按 {_settingsService.Current.WordExerciseHotkey} 识题，任意前台应用按 {_settingsService.Current.VisionScreenshotHotkey} 截图识题。";
             StatusDot.Fill = Brush(243, 156, 18);
         }
 
@@ -1726,13 +1887,22 @@ public partial class MainWindow : Window
     private void OpenSettings()
     {
         ShowMainWindow();
-        var dialog = new SettingsWindow(_settingsService.Current, !string.IsNullOrWhiteSpace(_apiKey)) { Owner = this };
+        var dialog = new SettingsWindow(
+            _settingsService.Current,
+            !string.IsNullOrWhiteSpace(_apiKey),
+            !string.IsNullOrWhiteSpace(_visionApiKey)) { Owner = this };
         if (dialog.ShowDialog() != true || dialog.UpdatedSettings is null) return;
         try
         {
             if (dialog.ClearApiKey) WindowsCredentialService.DeleteApiKey();
             if (!string.IsNullOrWhiteSpace(dialog.NewApiKey)) WindowsCredentialService.SaveApiKey(dialog.NewApiKey);
+            if (dialog.ClearVisionApiKey) WindowsCredentialService.DeleteZhipuApiKey();
+            if (!string.IsNullOrWhiteSpace(dialog.NewVisionApiKey))
+            {
+                WindowsCredentialService.SaveZhipuApiKey(dialog.NewVisionApiKey);
+            }
             _apiKey = SafeReadApiKey();
+            _visionApiKey = SafeReadVisionApiKey();
             _lastPredictionContext = null;
             _settingsService.Save(dialog.UpdatedSettings);
             ApplySettingsAfterSaveAsync().Forget();
@@ -1885,12 +2055,14 @@ public partial class MainWindow : Window
     private void MainWindow_OnClosed(object? sender, EventArgs e)
     {
         FlushPendingCaptureLog(force: true);
+        CancelVisionRequest();
         _predictionCancellation?.Cancel();
         _predictionCancellation?.Dispose();
         _hotkeyService.Dispose();
         _keyboardFallbackService.Dispose();
         _documentContextProbeService.Dispose();
         _deepSeekClient.Dispose();
+        _zhipuVisionClient.Dispose();
         _trayIcon.Dispose();
         _taskbarWindow.Close();
         _logger.Dispose();
@@ -1901,6 +2073,12 @@ public partial class MainWindow : Window
     private static string? SafeReadApiKey()
     {
         try { return WindowsCredentialService.ReadApiKey(); }
+        catch { return null; }
+    }
+
+    private static string? SafeReadVisionApiKey()
+    {
+        try { return WindowsCredentialService.ReadZhipuApiKey(); }
         catch { return null; }
     }
 

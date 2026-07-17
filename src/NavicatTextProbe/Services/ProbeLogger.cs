@@ -139,6 +139,9 @@ internal sealed class ProbeLogger : IDisposable
         settings.AiEnabled,
         settings.ApiBaseUrl,
         settings.Model,
+        settings.VisionEnabled,
+        settings.VisionApiBaseUrl,
+        settings.VisionModel,
         settings.PredictionDebounceMilliseconds,
         settings.PredictionMinimumIntervalMilliseconds,
         settings.TaskbarPanelEnabled,
@@ -146,8 +149,33 @@ internal sealed class ProbeLogger : IDisposable
         settings.MobileServerEnabled,
         settings.KeyboardFallbackEnabled,
         settings.WordExerciseHotkey,
-        note = "API Key、手机访问令牌和自定义全局提示词不会写入探测日志。"
+        settings.VisionScreenshotHotkey,
+        note = "API Key、手机访问令牌、自定义全局提示词和截图内容不会写入探测日志。"
     });
+
+    public void WriteVisionCapture(VisionCaptureSnapshot capture, long elapsedMilliseconds) => Write(
+        "vision_capture",
+        new
+        {
+            capture.Timestamp,
+            capture.Status,
+            capture.Message,
+            capture.ProcessName,
+            capture.ProcessId,
+            capture.WindowHandle,
+            capture.WindowBounds,
+            capture.CaretScreenBounds,
+            capture.CaretSource,
+            capture.CaretConfidence,
+            capture.DetailBounds,
+            capture.DetailMarkerX,
+            capture.DetailMarkerY,
+            fullImageBytes = capture.FullImageBytes.Length,
+            detailImageBytes = capture.DetailImageBytes.Length,
+            capture.CaptureHash,
+            elapsedMilliseconds,
+            note = "截图和 Base64 仅保存在内存中，不写入日志。"
+        });
 
     public void WriteSuggestion(
         string trigger,
@@ -163,6 +191,7 @@ internal sealed class ProbeLogger : IDisposable
             contextCharacters,
             elapsedMilliseconds,
             result.Mode,
+            result.Origin,
             result.DisplayText,
             insertText = isExercise ? null : result.InsertText,
             explanation = isExercise ? null : result.Explanation,

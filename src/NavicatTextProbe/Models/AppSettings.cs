@@ -16,6 +16,9 @@ public sealed record AppSettings
     public bool AiEnabled { get; set; } = true;
     public string ApiBaseUrl { get; set; } = "https://api.deepseek.com";
     public string Model { get; set; } = "deepseek-v4-flash";
+    public bool VisionEnabled { get; set; } = true;
+    public string VisionApiBaseUrl { get; set; } = "https://open.bigmodel.cn/api/paas/v4";
+    public string VisionModel { get; set; } = "glm-4.6v";
     public string CustomGlobalPrompt { get; set; } = string.Empty;
     public int PredictionDebounceMilliseconds { get; set; } = 850;
     public int PredictionMinimumIntervalMilliseconds { get; set; } = 1400;
@@ -29,6 +32,7 @@ public sealed record AppSettings
     public string CycleCandidatesHotkey { get; set; } = "Ctrl+Alt+R";
     public string AnalyzeSelectionHotkey { get; set; } = "Ctrl+Alt+E";
     public string WordExerciseHotkey { get; set; } = "Ctrl+Alt+A";
+    public string VisionScreenshotHotkey { get; set; } = "Ctrl+Shift+C";
     public DisplayStyle TaskbarStyle { get; set; } = new()
     {
         FontSize = 11,

@@ -234,7 +234,45 @@ internal sealed class WordDocumentContextService : IDisposable
             var prefixText = string.Empty;
             var selectedText = string.Empty;
             var suffixText = string.Empty;
+            PixelRect? caretScreenBounds = null;
             var reassemblesExactly = false;
+            if (selectionStart == selectionEnd)
+            {
+                object? caretRange = null;
+                try
+                {
+                    caretRange = (object?)((dynamic)selection).Range;
+                    if (caretRange is not null)
+                    {
+                        var screenLeft = 0;
+                        var screenTop = 0;
+                        var screenWidth = 0;
+                        var screenHeight = 0;
+                        ((dynamic)activeWindow).GetPoint(
+                            ref screenLeft,
+                            ref screenTop,
+                            ref screenWidth,
+                            ref screenHeight,
+                            caretRange);
+                        if (screenLeft >= 0 && screenTop >= 0 && screenHeight > 0)
+                        {
+                            caretScreenBounds = new PixelRect(
+                                screenLeft,
+                                screenTop,
+                                Math.Max(2, screenWidth),
+                                screenHeight);
+                        }
+                    }
+                }
+                catch
+                {
+                    // Some Word views do not expose a visible range rectangle.
+                }
+                finally
+                {
+                    ReleaseComObject(caretRange);
+                }
+            }
             if (isMainStory)
             {
                 prefixText = ReadRangeText(document, contentStart, selectionStart);
@@ -291,6 +329,8 @@ internal sealed class WordDocumentContextService : IDisposable
                 ContextBefore = Tail(prefixText, ContextCharacters),
                 ContextAfter = Head(suffixText, ContextCharacters),
                 CaretAvailable = isMainStory && reassemblesExactly,
+                CaretScreenBounds = caretScreenBounds,
+                CaretScreenSource = caretScreenBounds is null ? string.Empty : "Word COM ActiveWindow.GetPoint",
                 SelectedText = selectedText,
                 SelectionAvailable = true,
                 HasSelection = selectionEnd > selectionStart,

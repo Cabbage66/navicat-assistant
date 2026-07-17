@@ -42,6 +42,32 @@
                         <CheckBox x:Name="AiEnabledCheckBox" Margin="0,0,0,14" FontWeight="SemiBold"
                                   Content="启用自动 AI 预测" />
 
+                        <Separator Margin="0,2,0,14" />
+                        <TextBlock FontSize="17" FontWeight="SemiBold" Text="智谱视觉 API" />
+                        <TextBlock x:Name="VisionApiKeyStatusText" Margin="0,6,0,12" Foreground="#667788" />
+                        <TextBlock FontWeight="SemiBold" Text="新智谱 API Key" />
+                        <PasswordBox x:Name="VisionApiKeyPasswordBox" Margin="0,5,0,5" Height="32" Padding="8,4" />
+                        <TextBlock Foreground="#7B241C" TextWrapping="Wrap"
+                                   Text="只在主动按截图识题快捷键时发送前台窗口截图；Key 只保存到 Windows 凭据管理器。" />
+                        <CheckBox x:Name="ClearVisionApiKeyCheckBox" Margin="0,9,0,12" Content="删除已保存的智谱 API Key" />
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="18" />
+                                <ColumnDefinition Width="220" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock FontWeight="SemiBold" Text="视觉 API 地址" />
+                                <TextBox x:Name="VisionApiBaseUrlTextBox" Margin="0,5,0,0" Height="31" Padding="7,3" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock FontWeight="SemiBold" Text="视觉模型" />
+                                <TextBox x:Name="VisionModelTextBox" Margin="0,5,0,0" Height="31" Padding="7,3" />
+                            </StackPanel>
+                        </Grid>
+                        <CheckBox x:Name="VisionEnabledCheckBox" Margin="0,0,0,16" FontWeight="SemiBold"
+                                  Content="启用主动截图识题" />
+
                         <TextBlock FontWeight="SemiBold" Text="全局补充提示词" />
                         <TextBlock Margin="0,4,0,5" Foreground="#667788" TextWrapping="Wrap"
                                    Text="内置系统提示词已经负责 SQL Copilot、新手补全和错误诊断；这里填写你的业务、命名和输出偏好。" />
@@ -147,6 +173,7 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="210" />
@@ -160,6 +187,8 @@
                             <TextBox x:Name="CandidateHotkeyTextBox" Grid.Row="2" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
                             <TextBlock Grid.Row="3" Margin="0,8,0,0" VerticalAlignment="Center" Text="识别/切换 Word 当前题目" />
                             <TextBox x:Name="WordExerciseHotkeyTextBox" Grid.Row="3" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
+                            <TextBlock Grid.Row="4" Margin="0,8,0,0" VerticalAlignment="Center" Text="截图识别光标所在题目" />
+                            <TextBox x:Name="VisionScreenshotHotkeyTextBox" Grid.Row="4" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
                         </Grid>
                     </StackPanel>
                 </ScrollViewer>

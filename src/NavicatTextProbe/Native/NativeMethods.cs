@@ -25,6 +25,8 @@ internal static class NativeMethods
     internal const int WmSysKeyDown = 0x0104;
     internal const uint KeyeventfKeyup = 0x0002;
     internal const uint GaRoot = 2;
+    internal const uint GuiCaretBlinking = 0x00000001;
+    internal const int DwmwaExtendedFrameBounds = 9;
 
     internal delegate nint LowLevelKeyboardProc(int code, nint wParam, nint lParam);
 
@@ -43,6 +45,17 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetWindowRect(nint windowHandle, out NativeRect rectangle);
+
+    [DllImport("dwmapi.dll")]
+    internal static extern int DwmGetWindowAttribute(
+        nint windowHandle,
+        int attribute,
+        out NativeRect value,
+        int valueSize);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsIconic(nint windowHandle);
 
     [DllImport("user32.dll")]
     internal static extern uint GetDpiForWindow(nint windowHandle);
@@ -86,6 +99,17 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern uint GetWindowThreadProcessId(nint windowHandle, out uint processId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo guiThreadInfo);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern int MapWindowPoints(
+        nint fromWindow,
+        nint toWindow,
+        ref NativeRect points,
+        uint pointCount);
 
     [DllImport("ole32.dll", CharSet = CharSet.Unicode)]
     private static extern int CLSIDFromProgID(string programId, out Guid classId);
@@ -243,6 +267,20 @@ internal static class NativeMethods
     {
         public uint Size;
         public uint TickCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GuiThreadInfo
+    {
+        public uint Size;
+        public uint Flags;
+        public nint ActiveWindow;
+        public nint FocusWindow;
+        public nint CaptureWindow;
+        public nint MenuOwnerWindow;
+        public nint MoveSizeWindow;
+        public nint CaretWindow;
+        public NativeRect CaretRectangle;
     }
 
     internal static uint ReadLastInputTick()

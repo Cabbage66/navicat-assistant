@@ -23,6 +23,7 @@ public sealed record SuggestionResult
 {
     public DateTimeOffset Timestamp { get; init; } = DateTimeOffset.Now;
     public SuggestionMode Mode { get; init; }
+    public string Origin { get; init; } = string.Empty;
     public string DisplayText { get; init; } = string.Empty;
     public string InsertText { get; init; } = string.Empty;
     public string Explanation { get; init; } = string.Empty;

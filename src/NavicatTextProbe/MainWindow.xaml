@@ -18,7 +18,7 @@
             <StackPanel>
                 <TextBlock FontSize="25" FontWeight="SemiBold" Foreground="#17202A" Text="Assistant" />
                 <TextBlock Margin="0,5,0,0" Foreground="#5D6D7E"
-                           Text="读取全文和光标语法状态并预测下一行；Ctrl+Alt+S 整体启停，Ctrl+Alt+R 切换候选，Ctrl+Alt+E 诊断。" />
+                           Text="读取 Navicat/Word 上下文；Ctrl+Alt+S 整体启停，Ctrl+Alt+R 切换候选，Ctrl+Alt+E 诊断，Ctrl+Shift+C 截图识题。" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
                 <Button MinWidth="106" Height="34" Padding="14,0" Click="AnalyzeButton_OnClick" Content="分析剪贴板" />

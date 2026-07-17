@@ -22,7 +22,7 @@ internal sealed class MobileServerService : IAsyncDisposable
     private int _nextClientTaskId;
     private CancellationTokenSource? _serverCancellation;
     private Task? _serverLoop;
-    private SuggestionResult _suggestion = SuggestionResult.Info("等待 Navicat SQL 或 Word 练习题…");
+    private SuggestionResult _suggestion = SuggestionResult.Info("等待 Navicat SQL、Word 练习题或主动截图…");
     private AppSettings _settings = new();
 
     public bool IsRunning => _listener is not null;
@@ -261,7 +261,11 @@ internal sealed class MobileServerService : IAsyncDisposable
                                 _settings.TaskbarPanelEnabled,
                                 _settings.TaskbarWidth,
                                 _settings.MobileServerEnabled,
+                                _settings.VisionEnabled,
+                                _settings.VisionApiBaseUrl,
+                                _settings.VisionModel,
                                 _settings.WordExerciseHotkey,
+                                _settings.VisionScreenshotHotkey,
                                 taskbarStyle = _settings.TaskbarStyle,
                                 mobileStyle = _settings.MobileStyle
                             }
@@ -404,8 +408,12 @@ internal sealed class MobileServerService : IAsyncDisposable
           <details class="card"><summary>展示配置</summary><p class="muted">保存后会同步到电脑任务栏和当前手机页面。</p>
             <div class="grid">
               <label><input id="taskbarPanelEnabled" type="checkbox"> 开启任务栏内建议</label>
+              <label><input id="visionEnabled" type="checkbox"> 开启主动截图识题</label>
               <div class="field"><label>任务栏期望宽度</label><input id="taskbarWidth" type="number" min="200" max="1400" step="20"></div>
               <div class="field"><label>识别/切换 Word 当前题目快捷键</label><input id="wordExerciseHotkey" type="text" placeholder="Ctrl+Alt+A"></div>
+              <div class="field"><label>截图识题快捷键</label><input id="visionScreenshotHotkey" type="text" placeholder="Ctrl+Shift+C"></div>
+              <div class="field"><label>视觉 API 地址</label><input id="visionApiBaseUrl" type="text"></div>
+              <div class="field"><label>视觉模型</label><input id="visionModel" type="text"></div>
               <div class="field"><label>任务栏字号</label><input id="taskbarFont" type="number" min="10" max="36" step="1"></div>
               <div class="field"><label>任务栏行高</label><input id="taskbarLine" type="number" min="12" max="54" step="1"></div>
               <div class="field"><label>任务栏背景色</label><input id="taskbarBg" type="color"></div>
@@ -430,12 +438,15 @@ internal sealed class MobileServerService : IAsyncDisposable
               const m=c.mobileStyle||{};$('display').style.fontSize=(m.fontSize||18)+'px';$('display').style.lineHeight=(m.lineHeight||28)+'px';$('display').style.color=m.fontColor||'#7df2b1';
               const rgba=(hex,a)=>{const v=(hex||'#151d27').replace('#','');const n=parseInt(v.length===3?v.split('').map(x=>x+x).join(''):v,16);return `rgba(${n>>16},${n>>8&255},${n&255},${a??.96})`};document.querySelectorAll('.card').forEach(x=>x.style.backgroundColor=rgba(m.backgroundColor,m.backgroundOpacity));
               if(!populated){populated=true;$('taskbarPanelEnabled').checked=!!c.taskbarPanelEnabled;const t=c.taskbarStyle||{};
+                $('visionEnabled').checked=!!c.visionEnabled;
                 $('taskbarWidth').value=c.taskbarWidth||640;
                 $('wordExerciseHotkey').value=c.wordExerciseHotkey||'Ctrl+Alt+A';
+                $('visionScreenshotHotkey').value=c.visionScreenshotHotkey||'Ctrl+Shift+C';
+                $('visionApiBaseUrl').value=c.visionApiBaseUrl||'https://open.bigmodel.cn/api/paas/v4';$('visionModel').value=c.visionModel||'glm-4.6v';
                 $('taskbarFont').value=t.fontSize||14;$('taskbarLine').value=t.lineHeight||21;$('taskbarBg').value=t.backgroundColor||'#17202a';$('taskbarFg').value=t.fontColor||'#f8f9f9';$('taskbarOpacity').value=t.backgroundOpacity||.92;
                 $('mobileFont').value=m.fontSize||18;$('mobileLine').value=m.lineHeight||28;$('mobileBg').value=m.backgroundColor||'#151d27';$('mobileFg').value=m.fontColor||'#7df2b1';$('mobileOpacity').value=m.backgroundOpacity||.96;}}
               catch(e){$('display').textContent='无法连接电脑端：'+e.message}}
-            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,taskbarWidth:+$('taskbarWidth').value,wordExerciseHotkey:$('wordExerciseHotkey').value.trim(),taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
+            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,visionEnabled:$('visionEnabled').checked,visionApiBaseUrl:$('visionApiBaseUrl').value.trim(),visionModel:$('visionModel').value.trim(),taskbarWidth:+$('taskbarWidth').value,wordExerciseHotkey:$('wordExerciseHotkey').value.trim(),visionScreenshotHotkey:$('visionScreenshotHotkey').value.trim(),taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
               const r=await fetch(api('/api/settings'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('saved').textContent=r.ok?'已保存':'保存失败';setTimeout(()=>$('saved').textContent='',1800)};
             refresh();setInterval(refresh,1200);
           </script>
@@ -446,8 +457,12 @@ internal sealed class MobileServerService : IAsyncDisposable
 internal sealed record MobileSettingsPatch
 {
     public bool? TaskbarPanelEnabled { get; init; }
+    public bool? VisionEnabled { get; init; }
+    public string? VisionApiBaseUrl { get; init; }
+    public string? VisionModel { get; init; }
     public double? TaskbarWidth { get; init; }
     public string? WordExerciseHotkey { get; init; }
+    public string? VisionScreenshotHotkey { get; init; }
     public double? TaskbarFontSize { get; init; }
     public double? TaskbarLineHeight { get; init; }
     public string? TaskbarBackgroundColor { get; init; }

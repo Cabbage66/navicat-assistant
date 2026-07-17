@@ -6,15 +6,30 @@ namespace NavicatTextProbe.Services;
 
 internal static class WindowsCredentialService
 {
-    private const string TargetName = "NavicatSqlCopilot/DeepSeekApiKey";
+    private const string DeepSeekTargetName = "NavicatSqlCopilot/DeepSeekApiKey";
+    private const string ZhipuTargetName = "Assistant/ZhipuApiKey";
     private const uint CredentialTypeGeneric = 1;
     private const uint CredentialPersistLocalMachine = 2;
 
-    public static void SaveApiKey(string apiKey)
+    public static void SaveApiKey(string apiKey) =>
+        Save(DeepSeekTargetName, "DeepSeek API", apiKey);
+
+    public static string? ReadApiKey() => Read(DeepSeekTargetName);
+
+    public static void DeleteApiKey() => Delete(DeepSeekTargetName);
+
+    public static void SaveZhipuApiKey(string apiKey) =>
+        Save(ZhipuTargetName, "智谱 GLM API", apiKey);
+
+    public static string? ReadZhipuApiKey() => Read(ZhipuTargetName);
+
+    public static void DeleteZhipuApiKey() => Delete(ZhipuTargetName);
+
+    private static void Save(string targetName, string userName, string apiKey)
     {
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            DeleteApiKey();
+            Delete(targetName);
             return;
         }
 
@@ -26,11 +41,11 @@ internal static class WindowsCredentialService
             var credential = new NativeCredential
             {
                 Type = CredentialTypeGeneric,
-                TargetName = TargetName,
+                TargetName = targetName,
                 CredentialBlobSize = (uint)bytes.Length,
                 CredentialBlob = blob,
                 Persist = CredentialPersistLocalMachine,
-                UserName = "DeepSeek API"
+                UserName = userName
             };
 
             if (!CredWrite(ref credential, 0))
@@ -44,9 +59,9 @@ internal static class WindowsCredentialService
         }
     }
 
-    public static string? ReadApiKey()
+    private static string? Read(string targetName)
     {
-        if (!CredRead(TargetName, CredentialTypeGeneric, 0, out var credentialPointer))
+        if (!CredRead(targetName, CredentialTypeGeneric, 0, out var credentialPointer))
         {
             var error = Marshal.GetLastWin32Error();
             return error == 1168 ? null : throw new Win32Exception(error);
@@ -70,9 +85,9 @@ internal static class WindowsCredentialService
         }
     }
 
-    public static void DeleteApiKey()
+    private static void Delete(string targetName)
     {
-        if (!CredDelete(TargetName, CredentialTypeGeneric, 0))
+        if (!CredDelete(targetName, CredentialTypeGeneric, 0))
         {
             var error = Marshal.GetLastWin32Error();
             if (error != 1168)

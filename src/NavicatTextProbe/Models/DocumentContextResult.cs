@@ -25,6 +25,8 @@ internal sealed record DocumentContextResult
     public string ContextBefore { get; init; } = string.Empty;
     public string ContextAfter { get; init; } = string.Empty;
     public bool CaretAvailable { get; init; }
+    public PixelRect? CaretScreenBounds { get; init; }
+    public string CaretScreenSource { get; init; } = string.Empty;
     public string SelectedText { get; init; } = string.Empty;
     public bool SelectionAvailable { get; init; }
     public bool HasSelection { get; init; }

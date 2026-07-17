@@ -1,6 +1,6 @@
 # Assistant
 
-全部功能、源码、发布产物、配置和探测日志都位于本 `assistant` 目录。程序面向 Windows 版 Navicat Premium Lite 17 的 MySQL 8 SQL 辅助，以及 Microsoft Word 中的 SQL 数据库练习题回答，运行环境是 Windows x64 .NET 10。
+全部功能、源码、发布产物、配置和探测日志都位于本 `assistant` 目录。程序面向 Windows 版 Navicat Premium Lite 17 的 MySQL 8 SQL 辅助、Microsoft Word 中的 SQL 数据库练习题回答，以及任意前台应用的主动截图识题，运行环境是 Windows x64 .NET 10。
 
 ## 当前功能
 
@@ -15,13 +15,14 @@
 - Word 题目首次使用光标前后各 300 字，题目超出窗口时自动扩展到各 1,000/3,000 字。本地校验 AI 返回的原文块和边界锚点后再保存题目，选择题、填空题和简答题都由 AI 做语义判断。
 - 公共题干或 SQL 下的 `(1)(2)(3)` 按一整道顶层大题处理；简答题已有作答时，任务栏只显示光标后尚未写出的续写，不复述已有答案。照着建议输入时会在本地即时缩短剩余内容，写完后再分析下一个得分点；选择或复制文字期间暂停自动刷新。
 - 浏览器版钉钉云文档当前仍是只读文档预览，不调用 AI；网页接口无法可靠提供光标或选区时会明确显示“未识别”。
+- 在任意前台应用中按 `Ctrl+Shift+C`，Assistant 会定位文本插入光标、截取前台根窗口，并向智谱 `glm-4.6v` 发送一张干净全图和一张带空心红圈的光标局部图。选择/填空题直接返回答案；简答题已有作答时只返回光标后的续写。
 - 两个输出通道：Windows 11 任务栏内双行建议和局域网手机网页。可拖动悬浮窗已经移除。
 - 任务栏提示无边框，宽度可配置为 200–1400；空白位置不足时自动缩窄。
 - 任务栏提示使用不激活的 Win32 工具窗口样式，不进入 Alt+Tab/任务视图；切换应用时仍保持在任务栏区域，并且不修改或注入 Explorer。
-- `Ctrl+Alt+S` 是整套 Assistant 的总开关。关闭时停止探测、键盘兜底、在途 AI 请求、任务栏提示和手机服务；开启时恢复已配置通道，并立即读取当前 Navicat 或 Word 开始分析。
+- `Ctrl+Alt+S` 是整套 Assistant 的总开关。关闭时停止探测、键盘兜底、DeepSeek/智谱在途请求、截图识题、任务栏提示和手机服务；开启时恢复已配置通道，并立即读取当前 Navicat 或 Word 开始分析。
 - 应用、主窗口、手机页和托盘统一显示为 `Assistant`，使用 Windows 内置应用图标。
 - 手机页显示短建议、完整 SQL、Word 完整题目、完整答案、当前续写、解析和问题列表；任务栏宽度、样式与 Word 识别/切题快捷键可从手机反向同步。
-- DeepSeek API Key 只存入 Windows 凭据管理器，不进入 `settings.json`、源码或日志。
+- DeepSeek 和智谱 API Key 分别存入 Windows 凭据管理器，不进入 `settings.json`、源码或日志。
 
 DeepSeek 上下文口径来自[官方模型与价格页](https://api-docs.deepseek.com/quick_start/pricing/)。
 
@@ -57,8 +58,9 @@ assistant\dist\Assistant\Assistant.dll
 | 生成/切换当前光标的 3 个续写候选 | `Ctrl+Alt+R` |
 | 分析 Navicat 当前选中 SQL | `Ctrl+Alt+E` |
 | 识别/切换 Word 光标所在题目 | `Ctrl+Alt+A` |
+| 截图识别任意前台应用中光标所在题目 | `Ctrl+Shift+C` |
 
-关闭 Assistant 后只保留总开关快捷键，另外三个快捷键会注销；重新开启后自动注册回来。
+关闭 Assistant 后只保留总开关快捷键，另外四个快捷键会注销；重新开启后自动注册回来。`Ctrl+Shift+C` 在终端等软件中可能原本用于复制，可在设置页或手机页改成其他组合。
 
 ## 手机访问
 
@@ -76,7 +78,7 @@ assistant\dist\Assistant\Assistant.dll
 
 ## 日志与隐私
 
-探测日志位于 `assistant\logs`。成功捕获记录包含 SQL 全文；Word 主程序日志只记录文档哈希、长度、有限光标上下文和选区片段，练习题请求日志记录窗口、题号、题型和 token 元数据，不记录完整题目或识别到的用户作答。AI 开启时，整篇或裁剪后的 SQL 会发送给配置的 DeepSeek API；Word 只有在用户按 `Ctrl+Alt+A` 后才发送当前光标附近窗口，续写时另带已保存的当前顶层题目和相对基线的变化。不要对包含密码、API Key、隐私或禁止外发数据的文档启用 AI。
+探测日志位于 `assistant\logs`。成功捕获记录包含 SQL 全文；Word 主程序日志只记录文档哈希、长度、有限光标上下文和选区片段，练习题请求日志记录窗口、题号、题型和 token 元数据，不记录完整题目或识别到的用户作答。AI 开启时，整篇或裁剪后的 SQL 会发送给配置的 DeepSeek API；Word 只有在用户按 `Ctrl+Alt+A` 后才发送当前光标附近窗口，续写时另带已保存的当前顶层题目和相对基线的变化。截图识题只在用户主动按 `Ctrl+Shift+C` 时把前台窗口图片发送给智谱；图片和 Base64 只保存在内存，不写入日志或磁盘。不要对包含密码、API Key、隐私或禁止外发数据的窗口使用截图识题。
 
 单个本地文档探测上限是 500 万字符。全文日志会在输入停顿约 1.4 秒后合并写入，避免每次按键同步写盘；每分钟另记录一次低开销资源健康指标。
 
@@ -113,6 +115,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "\\wsl.localhost\Ubuntu-
 日志分别写入 `logs/document-probe-word-*.jsonl`、`logs/document-probe-wps-*.jsonl` 和 `logs/document-probe-dingtalk-*.jsonl`。Word 日志记录活动文档主正文、Story 内容、内容哈希、对象模型坐标、换算后的纯文本下标、光标前后文、选区以及保存状态；WPS 和钉钉日志记录 UI Automation 候选全文、内容哈希、控件与模式、推算的光标偏移及上下文、选区文本和范围。控制台只显示长度和偏移，不打印正文。
 
 这些验证日志包含文档内容。测试时请使用无密码、密钥和隐私数据的专用文档；日志仅保存在本机，不要公开上传。
+
+## 通用截图识题
+
+截图识题默认使用 `https://open.bigmodel.cn/api/paas/v4` 和 `glm-4.6v`，智谱 Key 需要在设置页单独保存。快捷键触发后，Assistant 优先使用 Word `ActiveWindow.GetPoint`，再尝试 UI Automation 文本范围和 Win32 `GetGUIThreadInfo.rcCaret`。无法取得可靠文本插入光标时会停止，不会静默把鼠标位置冒充光标。
+
+截图范围是当前前台根窗口而不是整个桌面。请求包含无标记全图和光标附近局部图；局部图上的红色空心圆及箭头由本地叠加，不会覆盖中心文字。新的截图请求会取消旧请求，总开关关闭时也会立即取消。任务栏显示短答案，手机页显示 OCR 题目、完整参考答案和解析。
 
 ## 重新构建与自检
 

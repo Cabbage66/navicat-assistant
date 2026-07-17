@@ -112,15 +112,33 @@ internal sealed class SettingsService
             settings.SettingsVersion = 4;
         }
 
+        if (settings.SettingsVersion < 5)
+        {
+            settings.VisionEnabled = true;
+            settings.VisionApiBaseUrl = "https://open.bigmodel.cn/api/paas/v4";
+            settings.VisionModel = "glm-4.6v";
+            settings.VisionScreenshotHotkey = "Ctrl+Shift+C";
+            settings.SettingsVersion = 5;
+        }
+
         settings.ApiBaseUrl = string.IsNullOrWhiteSpace(settings.ApiBaseUrl)
             ? "https://api.deepseek.com"
             : settings.ApiBaseUrl.TrimEnd('/');
         settings.Model = string.IsNullOrWhiteSpace(settings.Model)
             ? "deepseek-v4-flash"
             : settings.Model.Trim();
+        settings.VisionApiBaseUrl = string.IsNullOrWhiteSpace(settings.VisionApiBaseUrl)
+            ? "https://open.bigmodel.cn/api/paas/v4"
+            : settings.VisionApiBaseUrl.TrimEnd('/');
+        settings.VisionModel = string.IsNullOrWhiteSpace(settings.VisionModel)
+            ? "glm-4.6v"
+            : settings.VisionModel.Trim();
         settings.WordExerciseHotkey = string.IsNullOrWhiteSpace(settings.WordExerciseHotkey)
             ? "Ctrl+Alt+A"
             : settings.WordExerciseHotkey.Trim();
+        settings.VisionScreenshotHotkey = string.IsNullOrWhiteSpace(settings.VisionScreenshotHotkey)
+            ? "Ctrl+Shift+C"
+            : settings.VisionScreenshotHotkey.Trim();
         settings.MobilePort = Math.Clamp(settings.MobilePort, 1024, 65535);
         settings.PredictionDebounceMilliseconds = Math.Clamp(settings.PredictionDebounceMilliseconds, 150, 5000);
         settings.PredictionMinimumIntervalMilliseconds = Math.Clamp(settings.PredictionMinimumIntervalMilliseconds, 500, 5000);

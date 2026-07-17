@@ -80,7 +80,7 @@ internal sealed class DocumentContextProbeService : IDisposable
 
     public void Dispose() => _wordService.Dispose();
 
-    private static ForegroundWindowContext ReadForegroundWindow()
+    internal static ForegroundWindowContext ReadForegroundWindow()
     {
         var windowHandle = NativeMethods.GetForegroundWindow();
         if (windowHandle == nint.Zero)

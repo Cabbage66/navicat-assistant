@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Net;
+using System.Net.Http;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -268,6 +269,100 @@ Check("question-number normalization is owned by the program",
     WordExerciseContextBuilder.NormalizeQuestionNumber("**第4题。**") == "4" &&
     WordExerciseContextBuilder.NormalizeQuestionNumber("简答 4.") == "4" &&
     WordExerciseContextBuilder.NormalizeSubquestionNumber("（2）") == "2");
+
+var detailAtTopLeft = VisionScreenshotCaptureService.BuildDetailRectangle(2200, 1400, 8, 12);
+var detailAtBottomRight = VisionScreenshotCaptureService.BuildDetailRectangle(2200, 1400, 2190, 1390);
+Check("vision detail crops stay inside the screenshot at both edges",
+    detailAtTopLeft.Left == 0 && detailAtTopLeft.Top == 0 &&
+    detailAtTopLeft.Width == 1600 && detailAtTopLeft.Height == 1000 &&
+    detailAtBottomRight.Right == 2200 && detailAtBottomRight.Bottom == 1400);
+
+var visionCapture = new VisionCaptureSnapshot
+{
+    Status = VisionCaptureStatus.Captured,
+    ProcessName = "self-test-editor",
+    WindowBounds = new PixelRect(0, 0, 1200, 800),
+    CaretScreenBounds = new PixelRect(600, 400, 2, 20),
+    CaretSource = "self-test caret",
+    CaretConfidence = 0.97,
+    DetailBounds = new PixelRect(200, 100, 800, 600),
+    DetailMarkerX = 400,
+    DetailMarkerY = 300,
+    FullImageBytes = [1, 2, 3],
+    FullImageMediaType = "image/png",
+    DetailImageBytes = [4, 5, 6],
+    DetailImageMediaType = "image/png",
+    CaptureHash = "vision-self-test"
+};
+var visionPrompt = VisionExercisePromptTemplates.BuildUserPrompt(visionCapture);
+Check("vision prompt identifies the clean and annotated images plus exact marker coordinates",
+    VisionExercisePromptTemplates.DefaultSystemPrompt.Contains("红色空心圆", StringComparison.Ordinal) &&
+    visionPrompt.Contains("红圈中心像素：(400, 300)", StringComparison.Ordinal) &&
+    visionPrompt.Contains("(0.5000, 0.5000)", StringComparison.Ordinal));
+
+var visionArguments = JsonSerializer.Serialize(new
+{
+    is_question = true,
+    question_type = "short_answer",
+    question_number = "第6题",
+    active_subquestion_number = "（2）",
+    question_text = "第6题 请说明索引最左前缀原则。",
+    answer_state = "partial",
+    detected_user_answer_before_cursor = "联合索引从左向右匹配",
+    display_text = "，中间列缺失后后续列不能用于连续匹配。",
+    insert_text = "，中间列缺失后后续列不能用于连续匹配。",
+    full_answer = "联合索引应从最左列开始连续匹配。",
+    explanation = "这是光标后的剩余答案。",
+    confidence = 0.94
+});
+var visionEnvelope = JsonSerializer.Serialize(new
+{
+    choices = new[]
+    {
+        new
+        {
+            message = new
+            {
+                content = (string?)null,
+                tool_calls = new[]
+                {
+                    new
+                    {
+                        type = "function",
+                        function = new { name = "return_exercise_answer", arguments = visionArguments }
+                    }
+                }
+            }
+        }
+    },
+    usage = new { prompt_tokens = 456, completion_tokens = 78 }
+});
+var visionHandler = new RecordingHttpMessageHandler(visionEnvelope);
+SuggestionResult visionApiResult;
+using (var visionClient = new ZhipuVisionClient(visionHandler))
+{
+    visionApiResult = await visionClient.AnswerExerciseAsync(
+        new AppSettings
+        {
+            VisionApiBaseUrl = "https://vision-self-test.invalid/api/paas/v4",
+            VisionModel = "glm-4.6v"
+        },
+        "vision-self-test-key",
+        visionCapture,
+        CancellationToken.None);
+}
+Check("GLM vision request sends two images and maps function arguments",
+    visionHandler.AuthorizationScheme == "Bearer" &&
+    visionHandler.RequestBody.Split("\"type\":\"image_url\"", StringSplitOptions.None).Length == 3 &&
+    visionHandler.RequestBody.Contains("glm-4.6v", StringComparison.Ordinal) &&
+    visionApiResult.Origin == "vision_screenshot" &&
+    visionApiResult.Mode == SuggestionMode.ExerciseAnswer &&
+    visionApiResult.QuestionNumber == "6" &&
+    visionApiResult.ActiveSubquestionNumber == "2" &&
+    visionApiResult.AnswerState == "partial" &&
+    visionApiResult.InsertText.StartsWith('，') &&
+    visionApiResult.PromptTokens == 456 &&
+    visionApiResult.CompletionTokens == 78);
 
 var deepSeekListener = new TcpListener(IPAddress.Loopback, 0);
 deepSeekListener.Start();
@@ -656,8 +751,11 @@ try
     Check("legacy overlay users migrate to the taskbar channel", migratedSettings.Current.TaskbarPanelEnabled);
     Check("taskbar width is clamped to the supported range", migratedSettings.Current.TaskbarWidth == 1400);
     Check("global assistant hotkey defaults to Ctrl+Alt+S", migratedSettings.Current.ToggleAssistantHotkey == "Ctrl+Alt+S");
-    Check("Word identify/switch hotkey migrates to Ctrl+Alt+A",
-        migratedSettings.Current.SettingsVersion == 4 && migratedSettings.Current.WordExerciseHotkey == "Ctrl+Alt+A");
+    Check("Word and vision hotkeys migrate to their defaults",
+        migratedSettings.Current.SettingsVersion == 5 &&
+        migratedSettings.Current.WordExerciseHotkey == "Ctrl+Alt+A" &&
+        migratedSettings.Current.VisionScreenshotHotkey == "Ctrl+Shift+C" &&
+        migratedSettings.Current.VisionModel == "glm-4.6v");
     Check("removed overlay settings are not written back",
         !File.ReadAllText(migratedSettings.SettingsPath).Contains("OverlayEnabled", StringComparison.Ordinal));
 }
@@ -763,6 +861,11 @@ using (var logger = new ProbeLogger(loggerTestDirectory))
             CompletionTokens = 88
         },
         locateContext);
+    logger.WriteVisionCapture(visionCapture with
+    {
+        FullImageBytes = Encoding.UTF8.GetBytes("VISION_SECRET_PIXELS"),
+        DetailImageBytes = Encoding.UTF8.GetBytes("VISION_DETAIL_SECRET")
+    }, 45);
     for (var index = 0; index < 200; index++)
     {
         logger.WriteDiagnostic("bounded-queue-stress", index.ToString());
@@ -794,6 +897,13 @@ try
         !wordSuggestionData.TryGetProperty("DetectedUserAnswer", out _) &&
         wordSuggestionData.GetProperty("questionTextCharacters").GetInt32() > 0 &&
         wordSuggestionData.GetProperty("detectedUserAnswerCharacters").GetInt32() > 0);
+    var visionCaptureLine = loggerLines.First(document =>
+        document.RootElement.GetProperty("eventType").GetString() == "vision_capture");
+    var serializedVisionLog = visionCaptureLine.RootElement.GetRawText();
+    Check("vision logs retain only metadata and never image bytes or Base64",
+        !serializedVisionLog.Contains("VISION_SECRET_PIXELS", StringComparison.Ordinal) &&
+        !serializedVisionLog.Contains("VISION_DETAIL_SECRET", StringComparison.Ordinal) &&
+        serializedVisionLog.Contains("fullImageBytes", StringComparison.Ordinal));
 }
 finally
 {
@@ -809,7 +919,8 @@ Check("mobile page exposes the full Word question, full answer and current conti
     mobilePage.Contains("id=\"question\"", StringComparison.Ordinal) &&
     mobilePage.Contains("id=\"fullAnswer\"", StringComparison.Ordinal) &&
     mobilePage.Contains("当前光标续写", StringComparison.Ordinal) &&
-    mobilePage.Contains("识别/切换 Word 当前题目快捷键", StringComparison.Ordinal));
+    mobilePage.Contains("识别/切换 Word 当前题目快捷键", StringComparison.Ordinal) &&
+    mobilePage.Contains("截图识题快捷键", StringComparison.Ordinal));
 var accessUrls = mobileServer.GetAccessUrls(new AppSettings { MobileAccessToken = "self-test-token", MobilePort = 17832 });
 Check("localhost is the first desktop URL", new Uri(accessUrls[0]).Host == "127.0.0.1");
 var preferredPhoneHost = accessUrls.Skip(1).Select(url => new Uri(url).Host).FirstOrDefault();
@@ -824,3 +935,23 @@ if (failures.Count == 0)
 
 foreach (var failure in failures) Console.Error.WriteLine($"FAILED: {failure}");
 return 1;
+
+internal sealed class RecordingHttpMessageHandler(string responseBody) : HttpMessageHandler
+{
+    public string RequestBody { get; private set; } = string.Empty;
+    public string? AuthorizationScheme { get; private set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        AuthorizationScheme = request.Headers.Authorization?.Scheme;
+        RequestBody = request.Content is null
+            ? string.Empty
+            : await request.Content.ReadAsStringAsync(cancellationToken);
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(responseBody, Encoding.UTF8, "application/json")
+        };
+    }
+}
