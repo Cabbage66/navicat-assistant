@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Interop;
@@ -49,6 +50,443 @@ Check("DingTalk browser matching requires both a browser and a document title",
     !DocumentContextProbeService.IsDingTalkWebWindow("chrome", "Gmail - Google Chrome") &&
     !DocumentContextProbeService.IsDingTalkWebWindow("notepad", "测试 · 钉钉文档"));
 
+Check("read-only SQL validator accepts SELECT and WITH queries",
+    SafeMySqlQueryValidator.TryValidate("SELECT id FROM users WHERE status = 'UPDATE' LIMIT 5;", out var safeSelect, out _) &&
+    safeSelect.EndsWith("LIMIT 5", StringComparison.Ordinal) &&
+    SafeMySqlQueryValidator.TryValidate("WITH recent AS (SELECT id FROM orders) SELECT id FROM recent", out _, out _) &&
+    SafeMySqlQueryValidator.TryValidate("SHOW CREATE TABLE sales.orders", out _, out _));
+Check("read-only SQL validator rejects writes, multiple statements, files and executable comments",
+    !SafeMySqlQueryValidator.TryValidate("UPDATE users SET enabled = 1", out _, out _) &&
+    !SafeMySqlQueryValidator.TryValidate("SELECT 1; DELETE FROM users", out _, out _) &&
+    !SafeMySqlQueryValidator.TryValidate("SELECT * INTO OUTFILE '/tmp/x' FROM users", out _, out _) &&
+    !SafeMySqlQueryValidator.TryValidate("SELECT 1 /*!50000; DELETE FROM users */", out _, out _) &&
+    !SafeMySqlQueryValidator.TryValidate("SHOW CREATE USER admin", out _, out _) &&
+    !SafeMySqlQueryValidator.TryValidate(new string('x', 20_001), out _, out _));
+
+var databaseCatalog = new DatabaseCatalogSnapshot
+{
+    Summary = "SCHEMA `sales`: `orders`(rows≈100)\nTABLE `sales`.`orders`: `id` bigint PRI, `amount` decimal(10,2)",
+    SchemaCount = 1,
+    TableCount = 1,
+    ColumnCount = 2
+};
+var databaseToolSystemPrompt = PromptTemplates.BuildDatabaseToolSystemPrompt(new AppSettings(), databaseCatalog);
+Check("database catalog is supplied on every database-enabled model turn without a magic directive",
+    databaseToolSystemPrompt.Contains("query_mysql_readonly", StringComparison.Ordinal) &&
+    databaseToolSystemPrompt.Contains("`sales`.`orders`", StringComparison.Ordinal) &&
+    !databaseToolSystemPrompt.Contains("@assistant-db", StringComparison.Ordinal));
+
+var noDatabaseQueryPayload = JsonSerializer.Serialize(new
+{
+    mode = "completion",
+    display_text = "补全 WHERE 条件",
+    insert_text = " WHERE status = 1",
+    explanation = "目录已经足够，无需实时数据。",
+    issues = Array.Empty<string>(),
+    confidence = 0.9
+});
+var noDatabaseQueryEnvelope = JsonSerializer.Serialize(new
+{
+    choices = new[] { new { message = new { content = noDatabaseQueryPayload } } },
+    usage = new { prompt_tokens = 20, completion_tokens = 10 }
+});
+var noDatabaseQueryHandler = new SequenceHttpMessageHandler(noDatabaseQueryEnvelope);
+var unexpectedDatabaseExecution = false;
+DatabaseAssistedCompletionResult noDatabaseQueryResult;
+using (var databaseToolClient = new DeepSeekClient(noDatabaseQueryHandler))
+{
+    noDatabaseQueryResult = await databaseToolClient.CompleteWithDatabaseToolsAsync(
+        new AppSettings { ApiBaseUrl = "https://deepseek-self-test.invalid", Model = "self-test" },
+        "self-test-key",
+        "SELECT * FROM orders<CURSOR>",
+        databaseCatalog,
+        (_, _, _) =>
+        {
+            unexpectedDatabaseExecution = true;
+            return Task.FromResult(DatabaseContextResult.Failure("不应执行"));
+        },
+        CancellationToken.None);
+}
+Check("AI can finish from the cached catalog without querying live data",
+    !unexpectedDatabaseExecution &&
+    noDatabaseQueryResult.ToolCallCount == 0 &&
+    noDatabaseQueryResult.Suggestion.Origin == "database_catalog" &&
+    noDatabaseQueryHandler.RequestBodies.Single().Contains("query_mysql_readonly", StringComparison.Ordinal) &&
+    noDatabaseQueryHandler.RequestBodies.Single().Contains("tool_choice\":\"auto", StringComparison.Ordinal));
+
+var toolArguments = JsonSerializer.Serialize(new
+{
+    query = "SELECT COUNT(*) AS total FROM sales.orders",
+    purpose = "当前 SQL 需要实时订单总数"
+});
+var databaseToolCallEnvelope = JsonSerializer.Serialize(new
+{
+    choices = new[]
+    {
+        new
+        {
+            message = new
+            {
+                content = (string?)null,
+                tool_calls = new[]
+                {
+                    new
+                    {
+                        id = "call_database_1",
+                        type = "function",
+                        function = new { name = "query_mysql_readonly", arguments = toolArguments }
+                    }
+                }
+            }
+        }
+    },
+    usage = new { prompt_tokens = 30, completion_tokens = 8 }
+});
+var databaseFinalPayload = JsonSerializer.Serialize(new
+{
+    mode = "completion",
+    display_text = "使用实时总数",
+    insert_text = "SELECT 42 AS total_orders;",
+    explanation = "已使用只读工具结果。",
+    issues = Array.Empty<string>(),
+    confidence = 0.95
+});
+var databaseFinalEnvelope = JsonSerializer.Serialize(new
+{
+    choices = new[] { new { message = new { content = databaseFinalPayload } } },
+    usage = new { prompt_tokens = 40, completion_tokens = 12 }
+});
+var databaseToolHandler = new SequenceHttpMessageHandler(databaseToolCallEnvelope, databaseFinalEnvelope);
+var executedDatabaseQueries = new List<DatabaseToolRequest>();
+DatabaseAssistedCompletionResult databaseToolResult;
+using (var databaseToolClient = new DeepSeekClient(databaseToolHandler))
+{
+    databaseToolResult = await databaseToolClient.CompleteWithDatabaseToolsAsync(
+        new AppSettings { ApiBaseUrl = "https://deepseek-self-test.invalid", Model = "self-test" },
+        "self-test-key",
+        "统计订单<CURSOR>",
+        databaseCatalog,
+        (request, _, _) =>
+        {
+            executedDatabaseQueries.Add(request);
+            return Task.FromResult(new DatabaseContextResult
+            {
+                IsSuccess = true,
+                Message = "只读查询成功",
+                Query = request.Sql,
+                RowsSummary = "total\n---\n42",
+                RowCount = 1
+            });
+        },
+        CancellationToken.None);
+}
+Check("DeepSeek tool calls are executed and returned through an official-style tool message loop",
+    executedDatabaseQueries.Count == 1 &&
+    executedDatabaseQueries[0].Sql.StartsWith("SELECT COUNT", StringComparison.Ordinal) &&
+    databaseToolResult.ToolCallCount == 1 &&
+    databaseToolResult.SuccessfulQueryCount == 1 &&
+    databaseToolResult.Suggestion.Origin == "database_grounded" &&
+    databaseToolResult.Suggestion.PromptTokens == 70 &&
+    databaseToolHandler.RequestBodies.Count == 2 &&
+    databaseToolHandler.RequestBodies[1].Contains("tool_call_id\":\"call_database_1", StringComparison.Ordinal) &&
+    databaseToolHandler.RequestBodies[1].Contains("untrusted_database_result", StringComparison.Ordinal));
+
+var threeToolCallsEnvelope = JsonSerializer.Serialize(new
+{
+    choices = new[]
+    {
+        new
+        {
+            message = new
+            {
+                content = (string?)null,
+                tool_calls = Enumerable.Range(1, 3).Select(index => new
+                {
+                    id = $"call_limit_{index}",
+                    type = "function",
+                    function = new { name = "query_mysql_readonly", arguments = toolArguments }
+                }).ToArray()
+            }
+        }
+    }
+});
+var toolLimitHandler = new SequenceHttpMessageHandler(threeToolCallsEnvelope, databaseFinalEnvelope);
+var toolLimitExecutions = 0;
+DatabaseAssistedCompletionResult toolLimitResult;
+using (var databaseToolClient = new DeepSeekClient(toolLimitHandler))
+{
+    toolLimitResult = await databaseToolClient.CompleteWithDatabaseToolsAsync(
+        new AppSettings { ApiBaseUrl = "https://deepseek-self-test.invalid", Model = "self-test" },
+        "self-test-key",
+        "需要多个事实<CURSOR>",
+        databaseCatalog,
+        (request, _, _) =>
+        {
+            toolLimitExecutions++;
+            return Task.FromResult(new DatabaseContextResult
+            {
+                IsSuccess = true,
+                Query = request.Sql,
+                RowsSummary = "value\n---\n1",
+                RowCount = 1
+            });
+        },
+        CancellationToken.None);
+}
+Check("database tool execution is hard-capped at two calls per AI request",
+    toolLimitExecutions == 2 &&
+    toolLimitResult.ToolCallCount == 2 &&
+    toolLimitHandler.RequestBodies[1].Contains("tool_call_id\":\"call_limit_3", StringComparison.Ordinal) &&
+    toolLimitHandler.RequestBodies[1].Contains("ok\\u0022:false", StringComparison.Ordinal) &&
+    toolLimitHandler.RequestBodies[1].Contains("tool_choice\":\"none", StringComparison.Ordinal));
+
+var fallbackPayload = JsonSerializer.Serialize(new
+{
+    mode = "completion",
+    display_text = "智谱 GLM 补全",
+    insert_text = " WHERE status = 1",
+    explanation = "冗余接管后的解释。",
+    issues = Array.Empty<string>(),
+    confidence = 0.85
+});
+var fallbackEnvelope = JsonSerializer.Serialize(new
+{
+    choices = new[] { new { message = new { content = fallbackPayload } } },
+    usage = new { prompt_tokens = 30, completion_tokens = 12 }
+});
+var fallbackSettings = new AppSettings
+{
+    ApiBaseUrl = "https://deepseek-self-test.invalid",
+    Model = "self-test-deepseek",
+    FallbackEnabled = true,
+    FallbackApiBaseUrl = "https://glm-self-test.invalid/api/paas/v4",
+    FallbackModel = "glm-5.2"
+};
+
+var fallbackTimeoutHandler = new FallbackHttpMessageHandler();
+fallbackTimeoutHandler.QueueTimeout();
+fallbackTimeoutHandler.QueueResponse(fallbackEnvelope);
+SuggestionResult fallbackTimeoutResult;
+using (var fallbackTimeoutClient = new DeepSeekClient(fallbackTimeoutHandler))
+{
+    fallbackTimeoutResult = await fallbackTimeoutClient.CompleteAsync(
+        fallbackSettings,
+        "deepseek-key",
+        "SELECT * FROM orders<CURSOR>",
+        CancellationToken.None,
+        fallbackApiKey: "zhipu-shared-key");
+}
+Check("DeepSeek timeout falls back to 智谱 GLM with the shared key",
+    fallbackTimeoutHandler.RequestUrls.Count == 2 &&
+    fallbackTimeoutHandler.RequestUrls[0].StartsWith("https://deepseek-self-test.invalid", StringComparison.Ordinal) &&
+    fallbackTimeoutHandler.RequestUrls[1].StartsWith("https://glm-self-test.invalid/api/paas/v4", StringComparison.Ordinal) &&
+    fallbackTimeoutHandler.RequestBodies[1].Contains("\"model\":\"glm-5.2\"", StringComparison.Ordinal) &&
+    fallbackTimeoutHandler.AuthorizationValues[1] == "Bearer zhipu-shared-key" &&
+    fallbackTimeoutHandler.AuthorizationValues[1] != fallbackTimeoutHandler.AuthorizationValues[0] &&
+    fallbackTimeoutResult.Mode == SuggestionMode.Completion &&
+    fallbackTimeoutResult.DisplayText == "智谱 GLM 补全" &&
+    fallbackTimeoutResult.Explanation.Contains("智谱 glm-5.2", StringComparison.Ordinal));
+
+var fallbackSuccessHandler = new FallbackHttpMessageHandler();
+fallbackSuccessHandler.QueueResponse(fallbackEnvelope);
+SuggestionResult fallbackSuccessResult;
+using (var fallbackSuccessClient = new DeepSeekClient(fallbackSuccessHandler))
+{
+    fallbackSuccessResult = await fallbackSuccessClient.CompleteAsync(
+        fallbackSettings,
+        "deepseek-key",
+        "SELECT * FROM orders<CURSOR>",
+        CancellationToken.None,
+        fallbackApiKey: "zhipu-shared-key");
+}
+Check("DeepSeek success never triggers the GLM fallback",
+    fallbackSuccessHandler.RequestUrls.Count == 1 &&
+    fallbackSuccessResult.Mode == SuggestionMode.Completion);
+
+var fallbackDisabledHandler = new FallbackHttpMessageHandler();
+fallbackDisabledHandler.QueueTimeout();
+SuggestionResult fallbackDisabledResult;
+using (var fallbackDisabledClient = new DeepSeekClient(fallbackDisabledHandler))
+{
+    fallbackDisabledResult = await fallbackDisabledClient.CompleteAsync(
+        fallbackSettings with { FallbackEnabled = false },
+        "deepseek-key",
+        "SELECT 1",
+        CancellationToken.None,
+        fallbackApiKey: "zhipu-shared-key");
+}
+Check("fallback disabled keeps the DeepSeek timeout error",
+    fallbackDisabledHandler.RequestUrls.Count == 1 &&
+    fallbackDisabledResult.Mode == SuggestionMode.Error &&
+    fallbackDisabledResult.DisplayText == "连接 DeepSeek 失败");
+
+var fallbackNoKeyHandler = new FallbackHttpMessageHandler();
+fallbackNoKeyHandler.QueueTimeout();
+SuggestionResult fallbackNoKeyResult;
+using (var fallbackNoKeyClient = new DeepSeekClient(fallbackNoKeyHandler))
+{
+    fallbackNoKeyResult = await fallbackNoKeyClient.CompleteAsync(
+        fallbackSettings,
+        "deepseek-key",
+        "SELECT 1",
+        CancellationToken.None,
+        fallbackApiKey: string.Empty);
+}
+Check("fallback without a 智谱 key keeps the DeepSeek timeout error",
+    fallbackNoKeyHandler.RequestUrls.Count == 1 &&
+    fallbackNoKeyResult.Mode == SuggestionMode.Error &&
+    fallbackNoKeyResult.DisplayText == "连接 DeepSeek 失败");
+
+var fallbackTransportHandler = new FallbackHttpMessageHandler();
+fallbackTransportHandler.QueueTransportFailure();
+fallbackTransportHandler.QueueResponse(fallbackEnvelope);
+SuggestionResult fallbackTransportResult;
+using (var fallbackTransportClient = new DeepSeekClient(fallbackTransportHandler))
+{
+    fallbackTransportResult = await fallbackTransportClient.CompleteAsync(
+        fallbackSettings,
+        "deepseek-key",
+        "SELECT 1",
+        CancellationToken.None,
+        fallbackApiKey: "zhipu-shared-key");
+}
+Check("DeepSeek connection failure also falls back to GLM",
+    fallbackTransportHandler.RequestUrls.Count == 2 &&
+    fallbackTransportResult.Mode == SuggestionMode.Completion);
+
+var fallbackHttpErrorHandler = new FallbackHttpMessageHandler();
+fallbackHttpErrorHandler.QueueStatus(HttpStatusCode.InternalServerError, "upstream boom");
+SuggestionResult fallbackHttpErrorResult;
+using (var fallbackHttpErrorClient = new DeepSeekClient(fallbackHttpErrorHandler))
+{
+    fallbackHttpErrorResult = await fallbackHttpErrorClient.CompleteAsync(
+        fallbackSettings,
+        "deepseek-key",
+        "SELECT 1",
+        CancellationToken.None,
+        fallbackApiKey: "zhipu-shared-key");
+}
+Check("DeepSeek HTTP error status does not trigger the GLM fallback",
+    fallbackHttpErrorHandler.RequestUrls.Count == 1 &&
+    fallbackHttpErrorResult.Mode == SuggestionMode.Error &&
+    fallbackHttpErrorResult.DisplayText.StartsWith("DeepSeek 请求失败", StringComparison.Ordinal));
+
+Check("guided typing splits Unicode by text element instead of UTF-16 code unit",
+    GuidedTypingService.SplitTextElements("A😀中").Count == 3);
+Check("SendInput ABI matches the Windows x64 INPUT size",
+    Marshal.SizeOf<NativeMethods.NativeInput>() == 40);
+
+bool TestExclusiveHotkeyChord(HotkeyModifiers modifiers, uint virtualKey)
+{
+    var matcher = new ExclusiveHotkeyMatcher(
+        [new ParsedHotkey(HotkeyAction.ToggleGuidedTyping, modifiers, virtualKey, "Ctrl+Alt+D")]);
+    var controlDown = matcher.Process(0xA2, keyDown: true, keyUp: false, injected: false);
+    var altDown = matcher.Process(0xA4, keyDown: true, keyUp: false, injected: false);
+    var firstPress = matcher.Process(virtualKey, keyDown: true, keyUp: false, injected: false);
+    var repeatedPress = matcher.Process(virtualKey, keyDown: true, keyUp: false, injected: false);
+    var release = matcher.Process(virtualKey, keyDown: false, keyUp: true, injected: false);
+    var secondRelease = matcher.Process(virtualKey, keyDown: false, keyUp: true, injected: false);
+    return !controlDown.Suppress &&
+           !altDown.Suppress &&
+           firstPress.Suppress &&
+           firstPress.Action == HotkeyAction.ToggleGuidedTyping &&
+           repeatedPress.Suppress &&
+           repeatedPress.Action is null &&
+           release.Suppress &&
+           secondRelease is { Suppress: false, Action: null };
+}
+
+bool TestExclusiveHotkeySafety()
+{
+    _ = GlobalHotkeyService.TryParse("Ctrl+Alt+D", out var modifiers, out var virtualKey);
+    var matcher = new ExclusiveHotkeyMatcher(
+        [new ParsedHotkey(HotkeyAction.ToggleGuidedTyping, modifiers, virtualKey, "Ctrl+Alt+D")]);
+    _ = matcher.Process(0xA2, keyDown: true, keyUp: false, injected: false);
+    _ = matcher.Process(0xA4, keyDown: true, keyUp: false, injected: false);
+    _ = matcher.Process(0xA0, keyDown: true, keyUp: false, injected: false);
+    var extraModifier = matcher.Process(virtualKey, keyDown: true, keyUp: false, injected: false);
+    _ = matcher.Process(virtualKey, keyDown: false, keyUp: true, injected: false);
+    _ = matcher.Process(0xA0, keyDown: false, keyUp: true, injected: false);
+    var injected = matcher.Process(virtualKey, keyDown: true, keyUp: false, injected: true);
+    var physical = matcher.Process(virtualKey, keyDown: true, keyUp: false, injected: false);
+    return !extraModifier.Suppress &&
+           extraModifier.Action is null &&
+           !injected.Suppress &&
+           injected.Action is null &&
+           physical.Suppress &&
+           physical.Action == HotkeyAction.ToggleGuidedTyping;
+}
+
+bool TestDisabledAssistantHotkeySet()
+{
+    _ = GlobalHotkeyService.TryParse("Ctrl+Alt+S", out var modifiers, out var totalSwitchKey);
+    _ = GlobalHotkeyService.TryParse("Ctrl+Alt+D", out _, out var guidedTypingKey);
+    var matcher = new ExclusiveHotkeyMatcher(
+        [new ParsedHotkey(HotkeyAction.ToggleAssistant, modifiers, totalSwitchKey, "Ctrl+Alt+S")]);
+    _ = matcher.Process(0xA2, keyDown: true, keyUp: false, injected: false);
+    _ = matcher.Process(0xA4, keyDown: true, keyUp: false, injected: false);
+    var guidedTyping = matcher.Process(guidedTypingKey, keyDown: true, keyUp: false, injected: false);
+    _ = matcher.Process(guidedTypingKey, keyDown: false, keyUp: true, injected: false);
+    var totalSwitch = matcher.Process(totalSwitchKey, keyDown: true, keyUp: false, injected: false);
+    return !guidedTyping.Suppress &&
+           guidedTyping.Action is null &&
+           totalSwitch.Suppress &&
+           totalSwitch.Action == HotkeyAction.ToggleAssistant;
+}
+
+Check("hotkey validation recognizes aliases and fixed paging conflicts",
+    GlobalHotkeyService.TryValidateShortcutSet(
+        ["Ctrl+Alt+A", "Ctrl+Alt+C", "Ctrl+Alt+V", "Ctrl+Alt+O", "Win+PageUp", "Win+PageDown"],
+        out _) &&
+    !GlobalHotkeyService.TryValidateShortcutSet(["Ctrl+Alt+A", "Control+Alt+A"], out _) &&
+    !GlobalHotkeyService.TryValidateShortcutSet(["Ctrl+Alt+A", "not-a-hotkey"], out _));
+Check("exclusive hotkey matcher suppresses one physical chord without repeating the action",
+    GlobalHotkeyService.TryParse("Ctrl+Alt+D", out var guidedModifiers, out var guidedKey) &&
+    TestExclusiveHotkeyChord(guidedModifiers, guidedKey));
+Check("exclusive hotkey matcher ignores injected keys and non-exact modifier combinations",
+    TestExclusiveHotkeySafety());
+Check("disabled Assistant matcher keeps only the total switch exclusive",
+    TestDisabledAssistantHotkeySet());
+var sqlClipboardAnswer = ClipboardAnswerService.Select(new SuggestionResult
+{
+    Mode = SuggestionMode.Completion,
+    InsertText = "short continuation",
+    FullAnswer = "```sql\nSELECT * FROM orders;\n```"
+}, sqlAnswer: true);
+var fillClipboardAnswer = ClipboardAnswerService.Select(new SuggestionResult
+{
+    Mode = SuggestionMode.ExerciseAnswer,
+    QuestionType = "fill_blank",
+    FullAnswer = "SELECT；FROM；WHERE"
+}, sqlAnswer: false);
+Check("clipboard answer prefers the full answer and removes only an outer Markdown fence",
+    sqlClipboardAnswer is { Text: "SELECT * FROM orders;", Kind: "完整 SQL" });
+Check("clipboard answer labels ordered fill-blank values as a complete answer",
+    fillClipboardAnswer is { Text: "SELECT；FROM；WHERE", Kind: "填空题完整答案" });
+Check("clipboard answer rejects errors and enforces a local size ceiling",
+    ClipboardAnswerService.Select(SuggestionResult.Error("failure"), sqlAnswer: false) is null &&
+    ClipboardAnswerService.Select(new SuggestionResult
+    {
+        Mode = SuggestionMode.ExerciseAnswer,
+        FullAnswer = new string('答', ClipboardAnswerService.MaximumClipboardCharacters + 10)
+    }, sqlAnswer: false)?.CharacterCount == ClipboardAnswerService.MaximumClipboardCharacters);
+Check("clipboard question validation trims a complete question and rejects empty or oversized input",
+    ClipboardAnswerService.TryNormalizeQuestion("  查询最新订单  ", out var normalizedClipboardQuestion, out _) &&
+    normalizedClipboardQuestion == "查询最新订单" &&
+    !ClipboardAnswerService.TryNormalizeQuestion("  ", out _, out _) &&
+    !ClipboardAnswerService.TryNormalizeQuestion(
+        new string('题', ClipboardAnswerService.MaximumQuestionCharacters + 1),
+        out _,
+        out _));
+var sqlQuestionClipboardAnswer = ClipboardAnswerService.Select(new SuggestionResult
+{
+    Mode = SuggestionMode.ExerciseAnswer,
+    QuestionType = "sql",
+    FullAnswer = "SELECT 1;"
+}, sqlAnswer: false);
+Check("clipboard SQL questions receive the complete SQL label",
+    sqlQuestionClipboardAnswer is { Text: "SELECT 1;", Kind: "完整 SQL" });
+
 DocumentContextResult WordDocumentAt(string text, int caret, string identity = "word-exercise-self-test") => new()
 {
     Status = DocumentContextStatus.Captured,
@@ -62,6 +500,22 @@ DocumentContextResult WordDocumentAt(string text, int caret, string identity = "
     CaretAvailable = true,
     SelectionAvailable = true
 };
+
+var generalWordPrompt = PromptTemplates.BuildWordDocumentCompletionPrompt(
+    WordDocumentAt("项目背景\r需要补充结论\r附件", "项目背景\r需要补充".Length, "general-word"));
+Check("general Word writing prompt carries the full document and exact cursor",
+    generalWordPrompt.Contains("项目背景", StringComparison.Ordinal) &&
+    generalWordPrompt.Contains("需要补充<CURSOR>结论", StringComparison.Ordinal) &&
+    generalWordPrompt.Contains("附件", StringComparison.Ordinal) &&
+    generalWordPrompt.Split("<CURSOR>", StringSplitOptions.None).Length == 2);
+var literalGeneralWordPrompt = PromptTemplates.BuildWordDocumentCompletionPrompt(
+    WordDocumentAt("原文写着 <CURSOR> 但这里才是光标", "原文写着 <CURSOR>".Length, "literal-general-word"));
+Check("a literal cursor token cannot create a second general Word marker",
+    literalGeneralWordPrompt.Split("<CURSOR>", StringSplitOptions.None).Length == 2 &&
+    literalGeneralWordPrompt.Contains("文档中的 CURSOR 字样", StringComparison.Ordinal));
+Check("Word exercise routing requires exercise cues instead of any numbered SQL document",
+    MainWindow.LooksLikeDatabaseExercise("数据库基础\n简答 1. 什么是主键？\n答：唯一标识。\n简答 2. 什么是外键？") &&
+    !MainWindow.LooksLikeDatabaseExercise("数据库迁移说明\n1. 准备 SQL\n2. 执行校验\n3. 发布"));
 
 var multiPartExerciseDocument = string.Join("\r",
 [
@@ -535,6 +989,29 @@ Check("long Word answers use program-owned type/number formatting and stay taskb
     exerciseDockAnswer.StartsWith("简答题｜4.", StringComparison.Ordinal) &&
     exerciseDockAnswer.Length <= 100 &&
     exerciseDockAnswer.EndsWith('…'));
+var expandedExerciseDockAnswer = TaskbarSuggestionFormatter.BuildText(new SuggestionResult
+{
+    Mode = SuggestionMode.ExerciseAnswer,
+    IsQuestion = true,
+    QuestionType = "short_answer",
+    QuestionNumber = "第4题",
+    AnswerState = "empty",
+    DisplayText = exerciseDockAnswer,
+    InsertText = new string('答', 140),
+    FullAnswer = new string('答', 140)
+});
+Check("taskbar paging retains the complete exercise answer beyond the short preview",
+    expandedExerciseDockAnswer.StartsWith("简答题｜4.", StringComparison.Ordinal) &&
+    expandedExerciseDockAnswer.Length > 100 &&
+    !expandedExerciseDockAnswer.EndsWith('…'));
+var expandedPartialDockAnswer = TaskbarSuggestionFormatter.BuildText(realPartialAnswer with
+{
+    IsQuestion = true,
+    QuestionNumber = "3"
+});
+Check("taskbar paging expands only the unseen continuation for partial answers",
+    expandedPartialDockAnswer == $"简答题｜3.{realPartialAnswer.InsertText}" &&
+    !expandedPartialDockAnswer.Contains("1NF 要求属性原子性", StringComparison.Ordinal));
 Check("a model-repeated top-level number is removed before program formatting",
     WordExercisePresentation.BuildDisplayText(
         "第4题：(2) 等值列在前",
@@ -702,6 +1179,26 @@ var candidatePrompt = PromptTemplates.BuildCandidateContinuationPrompt(foreignKe
 Check("candidate prompt requests exactly three choices", candidatePrompt.Contains("恰好 3", StringComparison.Ordinal));
 Check("candidate prompt carries inferred foreign-key state", candidatePrompt.Contains("ForeignKeyConstraint", StringComparison.Ordinal));
 Check("candidate prompt forbids repeating is_default", candidatePrompt.Contains("is_default", StringComparison.Ordinal));
+var fullSqlAnswerPrompt = PromptTemplates.BuildFullSqlAnswerPrompt(foreignKeyProbe);
+Check("full-answer SQL prompt asks for a complete clipboard answer instead of a short continuation",
+    fullSqlAnswerPrompt.Contains("任务模式：full_sql_answer", StringComparison.Ordinal) &&
+    fullSqlAnswerPrompt.Contains("完整、可单独人工检查和执行", StringComparison.Ordinal) &&
+    fullSqlAnswerPrompt.Contains("full_answer", StringComparison.Ordinal) &&
+    fullSqlAnswerPrompt.Contains("<CURSOR>", StringComparison.Ordinal));
+var clipboardQuestionPrompt = PromptTemplates.BuildClipboardQuestionAnswerPrompt(
+    "查询当前最新月份销售额最高的公司");
+var clipboardQuestionSystemPrompt = PromptTemplates.BuildClipboardQuestionSystemPrompt(new AppSettings());
+var clipboardDatabaseSystemPrompt = PromptTemplates.BuildDatabaseToolSystemPrompt(
+    new AppSettings(),
+    databaseCatalog,
+    clipboardQuestionSystemPrompt);
+Check("clipboard question prompt requests a paste-ready full answer and permits autonomous read-only facts",
+    clipboardQuestionPrompt.Contains("任务模式：clipboard_question_answer", StringComparison.Ordinal) &&
+    clipboardQuestionPrompt.Contains("查询当前最新月份销售额最高的公司", StringComparison.Ordinal) &&
+    clipboardQuestionPrompt.Contains("自主使用只读数据库工具", StringComparison.Ordinal) &&
+    clipboardQuestionSystemPrompt.Contains("question_type=sql", StringComparison.Ordinal) &&
+    clipboardDatabaseSystemPrompt.Contains("剪贴板题目作答器", StringComparison.Ordinal) &&
+    clipboardDatabaseSystemPrompt.Contains("query_mysql_readonly", StringComparison.Ordinal));
 
 var formerlyTruncatedDocument = "FULL_DOCUMENT_START\n" + new string('x', 150_000) + "\nFULL_DOCUMENT_END";
 var formerlyTruncatedPrompt = PromptTemplates.BuildCompletionPrompt(new ProbeResult
@@ -751,11 +1248,22 @@ try
     Check("legacy overlay users migrate to the taskbar channel", migratedSettings.Current.TaskbarPanelEnabled);
     Check("taskbar width is clamped to the supported range", migratedSettings.Current.TaskbarWidth == 1400);
     Check("global assistant hotkey defaults to Ctrl+Alt+S", migratedSettings.Current.ToggleAssistantHotkey == "Ctrl+Alt+S");
-    Check("Word and vision hotkeys migrate to their defaults",
-        migratedSettings.Current.SettingsVersion == 5 &&
+    Check("core hotkeys and database settings migrate to the unified defaults",
+        migratedSettings.Current.SettingsVersion == 9 &&
         migratedSettings.Current.WordExerciseHotkey == "Ctrl+Alt+A" &&
-        migratedSettings.Current.VisionScreenshotHotkey == "Ctrl+Shift+C" &&
-        migratedSettings.Current.VisionModel == "glm-4.6v");
+        migratedSettings.Current.SmartActionHotkey == "Ctrl+Alt+A" &&
+        migratedSettings.Current.CopyFullAnswerHotkey == "Ctrl+Alt+C" &&
+        migratedSettings.Current.AnswerClipboardQuestionHotkey == "Ctrl+Alt+V" &&
+        migratedSettings.Current.VisionScreenshotHotkey == "Ctrl+Alt+O" &&
+        migratedSettings.Current.GuidedTypingHotkey == "Ctrl+Alt+D" &&
+        migratedSettings.Current.ToggleMobileHotkey == "Ctrl+Alt+M" &&
+        migratedSettings.Current.DatabaseConnection.ProfileId == "default" &&
+        migratedSettings.Current.VisionModel == "glm-4.6v" &&
+        migratedSettings.Current.FallbackEnabled &&
+        migratedSettings.Current.FallbackModel == "glm-5.2" &&
+        migratedSettings.Current.FallbackApiBaseUrl == "https://open.bigmodel.cn/api/paas/v4");
+    Check("settings never serialize a database password",
+        !File.ReadAllText(migratedSettings.SettingsPath).Contains("DatabasePassword", StringComparison.OrdinalIgnoreCase));
     Check("removed overlay settings are not written back",
         !File.ReadAllText(migratedSettings.SettingsPath).Contains("OverlayEnabled", StringComparison.Ordinal));
 }
@@ -765,6 +1273,8 @@ finally
 }
 
 long taskbarExtendedStyle = 0;
+var taskbarPageCount = 1;
+var taskbarAdvancedToSecondPage = false;
 Exception? taskbarStyleError = null;
 var taskbarStyleThread = new Thread(() =>
 {
@@ -773,6 +1283,17 @@ var taskbarStyleThread = new Thread(() =>
         var taskbarWindow = new TaskbarSuggestionWindow();
         var handle = new WindowInteropHelper(taskbarWindow).EnsureHandle();
         taskbarExtendedStyle = NativeMethods.GetWindowLongPtr(handle, NativeMethods.GwlExStyle).ToInt64();
+        taskbarWindow.Width = 240;
+        taskbarWindow.Height = 44;
+        taskbarWindow.UpdateSuggestion(
+            SuggestionResult.Info(new string('长', 400)),
+            new DisplayStyle { FontSize = 11, LineHeight = 15 },
+            240);
+        taskbarWindow.Opacity = 0;
+        taskbarWindow.Show();
+        taskbarWindow.UpdateLayout();
+        taskbarAdvancedToSecondPage = taskbarWindow.ChangePage(1);
+        taskbarPageCount = taskbarWindow.PageCount;
         taskbarWindow.Close();
     }
     catch (Exception ex)
@@ -788,6 +1309,41 @@ Check("taskbar suggestion is excluded from app switching",
     (taskbarExtendedStyle & NativeMethods.WsExToolWindow) != 0 &&
     (taskbarExtendedStyle & NativeMethods.WsExNoActivate) != 0 &&
     (taskbarExtendedStyle & NativeMethods.WsExAppWindow) == 0);
+Check("taskbar WPF layout exposes a second page for long content",
+    taskbarPageCount > 1 &&
+    taskbarAdvancedToSecondPage);
+Check("taskbar pagination counts complete visual pages and tolerates invalid layout values",
+    TaskbarSuggestionWindow.CalculatePageCount(75, 30) == 3 &&
+    TaskbarSuggestionWindow.CalculatePageCount(30, 30) == 1 &&
+    TaskbarSuggestionWindow.CalculatePageCount(double.NaN, 30) == 1 &&
+    TaskbarSuggestionWindow.CalculatePageCount(75, 0) == 1);
+
+var exclusiveHookInstalled = false;
+Exception? exclusiveHookError = null;
+var exclusiveHookThread = new Thread(() =>
+{
+    try
+    {
+        var window = new System.Windows.Window();
+        var handle = new WindowInteropHelper(window).EnsureHandle();
+        using var service = new GlobalHotkeyService();
+        var errors = service.Register(handle, new Dictionary<HotkeyAction, string>
+        {
+            [HotkeyAction.ToggleAssistant] = "Ctrl+Alt+S"
+        });
+        exclusiveHookInstalled = service.UsesExclusiveInterception && errors.Count == 0;
+        window.Close();
+    }
+    catch (Exception ex)
+    {
+        exclusiveHookError = ex;
+    }
+});
+exclusiveHookThread.SetApartmentState(ApartmentState.STA);
+exclusiveHookThread.Start();
+exclusiveHookThread.Join();
+Check("exclusive global hotkey hook installs and releases on a dedicated Windows message thread",
+    exclusiveHookError is null && exclusiveHookInstalled);
 
 var nativeEditorText = new string('w', 12_000);
 string nativeReadText = string.Empty;
@@ -833,6 +1389,18 @@ using (var logger = new ProbeLogger(loggerTestDirectory))
 {
     loggerTestPath = logger.LogPath;
     logger.WriteSessionStarted();
+    logger.WriteConfiguration(new AppSettings
+    {
+        DatabaseConnection = new DatabaseConnectionSettings
+        {
+            Enabled = true,
+            ProfileId = "PRIVATE_PROFILE_ID",
+            Host = "PRIVATE_DATABASE_HOST",
+            Username = "PRIVATE_DATABASE_USER"
+        }
+    });
+    logger.WriteDatabaseContext(false, 0, false, "PRIVATE_DATABASE_EXCEPTION users SELECT secret");
+    logger.WriteClipboardAnswer("navicat_sql", "完整 SQL", 321, true);
     logger.WriteState(new ProbeResult
     {
         Status = ProbeStatus.Captured,
@@ -881,6 +1449,20 @@ try
     Check("bounded background logger drains entries on dispose", loggerLines.Any(document => document.RootElement.GetProperty("eventType").GetString() == "session_ended"));
     var stateData = loggerLines.First(document => document.RootElement.GetProperty("eventType").GetString() == "state").RootElement.GetProperty("data");
     Check("state logs omit full SQL text", !stateData.TryGetProperty("Text", out _) && !stateData.TryGetProperty("text", out _));
+    var serializedDatabaseLogs = string.Join('\n', loggerLines
+        .Where(document => document.RootElement.GetProperty("eventType").GetString() is "configuration" or "database_context")
+        .Select(document => document.RootElement.GetRawText()));
+    Check("database logs omit connection identity and exception contents",
+        !serializedDatabaseLogs.Contains("PRIVATE_PROFILE_ID", StringComparison.Ordinal) &&
+        !serializedDatabaseLogs.Contains("PRIVATE_DATABASE_HOST", StringComparison.Ordinal) &&
+        !serializedDatabaseLogs.Contains("PRIVATE_DATABASE_USER", StringComparison.Ordinal) &&
+        !serializedDatabaseLogs.Contains("PRIVATE_DATABASE_EXCEPTION", StringComparison.Ordinal));
+    var serializedClipboardLog = loggerLines.First(document =>
+        document.RootElement.GetProperty("eventType").GetString() == "clipboard_answer").RootElement.GetRawText();
+    Check("clipboard logs retain only metadata and never the answer body",
+        serializedClipboardLog.Contains("characterCount", StringComparison.Ordinal) &&
+        serializedClipboardLog.Contains("321", StringComparison.Ordinal) &&
+        !serializedClipboardLog.Contains("SELECT * FROM", StringComparison.Ordinal));
     var captureData = loggerLines.First(document => document.RootElement.GetProperty("eventType").GetString() == "capture").RootElement.GetProperty("data");
     Check("debounced capture logs retain full SQL", captureData.GetProperty("Text").GetString() == "SELECT 1;");
     Check("element diagnostics do not duplicate full editor text", captureData.GetProperty("Elements")[0].GetProperty("Name").GetString()!.Length < 240);
@@ -919,8 +1501,13 @@ Check("mobile page exposes the full Word question, full answer and current conti
     mobilePage.Contains("id=\"question\"", StringComparison.Ordinal) &&
     mobilePage.Contains("id=\"fullAnswer\"", StringComparison.Ordinal) &&
     mobilePage.Contains("当前光标续写", StringComparison.Ordinal) &&
-    mobilePage.Contains("识别/切换 Word 当前题目快捷键", StringComparison.Ordinal) &&
-    mobilePage.Contains("截图识题快捷键", StringComparison.Ordinal));
+    mobilePage.Contains("智能分析当前内容快捷键", StringComparison.Ordinal) &&
+    mobilePage.Contains("屏幕 OCR 快捷键", StringComparison.Ordinal) &&
+    mobilePage.Contains("完整答案复制快捷键", StringComparison.Ordinal) &&
+    mobilePage.Contains("剪贴板题目回答快捷键", StringComparison.Ordinal) &&
+    mobilePage.Contains("mainLight", StringComparison.Ordinal) &&
+    mobilePage.Contains("databaseLight", StringComparison.Ordinal) &&
+    mobilePage.Contains("typingLight", StringComparison.Ordinal));
 var accessUrls = mobileServer.GetAccessUrls(new AppSettings { MobileAccessToken = "self-test-token", MobilePort = 17832 });
 Check("localhost is the first desktop URL", new Uri(accessUrls[0]).Host == "127.0.0.1");
 var preferredPhoneHost = accessUrls.Skip(1).Select(url => new Uri(url).Host).FirstOrDefault();
@@ -953,5 +1540,82 @@ internal sealed class RecordingHttpMessageHandler(string responseBody) : HttpMes
         {
             Content = new StringContent(responseBody, Encoding.UTF8, "application/json")
         };
+    }
+}
+
+internal sealed class SequenceHttpMessageHandler(params string[] responseBodies) : HttpMessageHandler
+{
+    private readonly Queue<string> _responses = new(responseBodies);
+
+    public List<string> RequestBodies { get; } = [];
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        RequestBodies.Add(request.Content is null
+            ? string.Empty
+            : await request.Content.ReadAsStringAsync(cancellationToken));
+        if (_responses.Count == 0)
+        {
+            return new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent("No queued self-test response", Encoding.UTF8, "text/plain")
+            };
+        }
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(_responses.Dequeue(), Encoding.UTF8, "application/json")
+        };
+    }
+}
+
+internal sealed class FallbackHttpMessageHandler : HttpMessageHandler
+{
+    private readonly Queue<Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>>> _behaviors = new();
+
+    public List<string> RequestUrls { get; } = [];
+
+    public List<string?> AuthorizationValues { get; } = [];
+
+    public List<string> RequestBodies { get; } = [];
+
+    public void QueueResponse(string responseBody) =>
+        _behaviors.Enqueue((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(responseBody, Encoding.UTF8, "application/json")
+        }));
+
+    public void QueueStatus(HttpStatusCode status, string responseBody) =>
+        _behaviors.Enqueue((_, _) => Task.FromResult(new HttpResponseMessage(status)
+        {
+            Content = new StringContent(responseBody, Encoding.UTF8, "text/plain")
+        }));
+
+    public void QueueTimeout() =>
+        _behaviors.Enqueue((_, _) =>
+            Task.FromException<HttpResponseMessage>(new TaskCanceledException("self-test timeout")));
+
+    public void QueueTransportFailure() =>
+        _behaviors.Enqueue((_, _) =>
+            Task.FromException<HttpResponseMessage>(new HttpRequestException("self-test connection refused")));
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        RequestUrls.Add(request.RequestUri?.ToString() ?? string.Empty);
+        AuthorizationValues.Add(request.Headers.Authorization?.ToString());
+        RequestBodies.Add(request.Content is null
+            ? string.Empty
+            : await request.Content.ReadAsStringAsync(cancellationToken));
+        if (_behaviors.Count == 0)
+        {
+            return new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent("No queued self-test behavior", Encoding.UTF8, "text/plain")
+            };
+        }
+        return await _behaviors.Dequeue()(request, cancellationToken);
     }
 }

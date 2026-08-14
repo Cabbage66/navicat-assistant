@@ -23,9 +23,14 @@ internal static class NativeMethods
     internal const int WhKeyboardLl = 13;
     internal const int WmKeyDown = 0x0100;
     internal const int WmSysKeyDown = 0x0104;
+    internal const int WmKeyUp = 0x0101;
+    internal const int WmSysKeyUp = 0x0105;
+    internal const uint InputKeyboard = 1;
     internal const uint KeyeventfKeyup = 0x0002;
+    internal const uint KeyeventfUnicode = 0x0004;
     internal const uint GaRoot = 2;
     internal const uint GuiCaretBlinking = 0x00000001;
+    internal const uint GcsCompStr = 0x0008;
     internal const int DwmwaExtendedFrameBounds = 9;
 
     internal delegate nint LowLevelKeyboardProc(int code, nint wParam, nint lParam);
@@ -168,6 +173,23 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     internal static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, nuint extraInfo);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern uint SendInput(uint inputCount, NativeInput[] inputs, int inputSize);
+
+    [DllImport("imm32.dll")]
+    internal static extern nint ImmGetContext(nint windowHandle);
+
+    [DllImport("imm32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ImmReleaseContext(nint windowHandle, nint inputContext);
+
+    [DllImport("imm32.dll", EntryPoint = "ImmGetCompositionStringW")]
+    internal static extern int ImmGetCompositionString(
+        nint inputContext,
+        uint index,
+        nint buffer,
+        uint bufferLength);
+
     [DllImport("user32.dll", EntryPoint = "GetWindowTextLengthW")]
     private static extern int GetWindowTextLength(nint windowHandle);
 
@@ -281,6 +303,32 @@ internal static class NativeMethods
         public nint MoveSizeWindow;
         public nint CaretWindow;
         public NativeRect CaretRectangle;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NativeInput
+    {
+        public uint Type;
+        public NativeInputUnion Data;
+    }
+
+    // Assistant only publishes win-x64. Native INPUT uses a 32-byte union on x64,
+    // even though KEYBDINPUT itself is 24 bytes; SendInput rejects the smaller ABI.
+    [StructLayout(LayoutKind.Explicit, Size = 32)]
+    internal struct NativeInputUnion
+    {
+        [FieldOffset(0)]
+        public KeyboardInput Keyboard;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct KeyboardInput
+    {
+        public ushort VirtualKey;
+        public ushort ScanCode;
+        public uint Flags;
+        public uint Time;
+        public nuint ExtraInfo;
     }
 
     internal static uint ReadLastInputTick()

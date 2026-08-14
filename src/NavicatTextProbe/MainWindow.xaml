@@ -18,7 +18,7 @@
             <StackPanel>
                 <TextBlock FontSize="25" FontWeight="SemiBold" Foreground="#17202A" Text="Assistant" />
                 <TextBlock Margin="0,5,0,0" Foreground="#5D6D7E"
-                           Text="读取 Navicat/Word 上下文；Ctrl+Alt+S 整体启停，Ctrl+Alt+R 切换候选，Ctrl+Alt+E 诊断，Ctrl+Shift+C 截图识题。" />
+                           Text="读取 Navicat/Word/剪贴板题目；Ctrl+Alt+C/V 分别复制当前题答案和回答剪贴板题目。" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
                 <Button MinWidth="106" Height="34" Padding="14,0" Click="AnalyzeButton_OnClick" Content="分析剪贴板" />
@@ -34,7 +34,11 @@
                 Background="White" BorderBrush="#D5D8DC" BorderThickness="1">
             <Grid>
                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                <Ellipse x:Name="StatusDot" Width="11" Height="11" Margin="0,3,10,0" VerticalAlignment="Top" Fill="#F39C12" />
+                <StackPanel Margin="0,2,10,0" VerticalAlignment="Top">
+                    <Ellipse x:Name="StatusDot" Width="7" Height="7" Margin="0,0,0,3" Fill="#F39C12" ToolTip="主流程" />
+                    <Ellipse x:Name="DatabaseStatusDot" Width="7" Height="7" Margin="0,0,0,3" Fill="#7F8C8D" ToolTip="数据库增强" />
+                    <Ellipse x:Name="GuidedTypingStatusDot" Width="7" Height="7" Fill="#7F8C8D" ToolTip="受控代打" />
+                </StackPanel>
                 <StackPanel Grid.Column="1">
                     <TextBlock x:Name="StatusText" FontWeight="SemiBold" Foreground="#273746" Text="正在启动探测器……" />
                     <TextBlock x:Name="DetailText" Margin="0,4,0,0" Foreground="#667788" TextWrapping="Wrap" Text="尚未捕获文本。" />

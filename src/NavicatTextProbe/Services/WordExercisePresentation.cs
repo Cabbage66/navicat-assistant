@@ -97,7 +97,36 @@ internal static class WordExercisePresentation
         string insertText,
         string questionType,
         string questionNumber,
-        bool continuation)
+        bool continuation) =>
+        BuildDisplayTextCore(
+            displayText,
+            insertText,
+            questionType,
+            questionNumber,
+            continuation,
+            maximumLength: 100);
+
+    public static string BuildExpandedDisplayText(
+        string displayText,
+        string insertText,
+        string questionType,
+        string questionNumber,
+        bool continuation) =>
+        BuildDisplayTextCore(
+            displayText,
+            insertText,
+            questionType,
+            questionNumber,
+            continuation,
+            maximumLength: null);
+
+    private static string BuildDisplayTextCore(
+        string displayText,
+        string insertText,
+        string questionType,
+        string questionNumber,
+        bool continuation,
+        int? maximumLength)
     {
         var typeText = ToDisplayType(questionType);
         var number = WordExerciseContextBuilder.NormalizeQuestionNumber(questionNumber);
@@ -132,10 +161,13 @@ internal static class WordExercisePresentation
         {
             answer = continuation ? "答案已较完整，暂时无需续写" : "暂时没有可靠答案";
         }
-        var maximumAnswerLength = Math.Max(1, 100 - prefix.Length);
-        if (answer.Length > maximumAnswerLength)
+        if (maximumLength is int limit)
         {
-            answer = answer[..Math.Max(1, maximumAnswerLength - 1)] + "…";
+            var maximumAnswerLength = Math.Max(1, limit - prefix.Length);
+            if (answer.Length > maximumAnswerLength)
+            {
+                answer = answer[..Math.Max(1, maximumAnswerLength - 1)] + "…";
+            }
         }
         return prefix + answer;
     }

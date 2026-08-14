@@ -4,6 +4,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using NavicatTextProbe.Models;
 using NavicatTextProbe.Native;
+using NavicatTextProbe.Services;
 using Color = System.Windows.Media.Color;
 using ColorConverter = System.Windows.Media.ColorConverter;
 
@@ -15,6 +16,10 @@ public partial class TaskbarSuggestionWindow : Window
     private HwndSource? _windowSource;
     private nint _windowHandle;
     private double _preferredWidth = 640;
+    private double _pageHeight = 30;
+    private int _currentPageIndex;
+    private int _pageCount = 1;
+    private bool _paginationRefreshQueued;
 
     public TaskbarSuggestionWindow()
     {
@@ -29,6 +34,7 @@ public partial class TaskbarSuggestionWindow : Window
             if (IsVisible)
             {
                 Reposition();
+                QueuePaginationRefresh();
                 _positionTimer.Start();
             }
             else
@@ -59,21 +65,62 @@ public partial class TaskbarSuggestionWindow : Window
     public void UpdateSuggestion(SuggestionResult suggestion, DisplayStyle style, double preferredWidth)
     {
         _preferredWidth = Math.Clamp(preferredWidth, 200, 1400);
-        var displayText = string.IsNullOrWhiteSpace(suggestion.DisplayText)
-            ? "当前没有可靠建议"
-            : suggestion.DisplayText;
-        SuggestionText.Text = suggestion.HasCandidates
-            ? $"{suggestion.ActiveCandidateIndex + 1}/{suggestion.Candidates.Count}  {displayText}"
-            : displayText;
+        SuggestionText.Text = TaskbarSuggestionFormatter.BuildText(suggestion);
         SuggestionText.FontSize = style.FontSize;
         SuggestionText.LineHeight = style.LineHeight;
-        SuggestionText.MaxHeight = style.LineHeight * 2 + 1;
+        SuggestionScroller.MaxHeight = style.LineHeight * 2 + 1;
         SuggestionText.Foreground = ParseBrush(style.FontColor, Colors.White);
+        PageIndicator.FontSize = Math.Max(9, style.FontSize - 2);
+        PageIndicator.Foreground = ParseBrush(style.FontColor, Colors.White);
         SuggestionBorder.Background = ParseBrush(
             style.BackgroundColor,
             Color.FromRgb(32, 32, 32),
             style.BackgroundOpacity);
+        ResetPagination();
         if (IsVisible) Reposition();
+    }
+
+    internal void UpdateRuntimeStatus(AssistantRuntimeStatus status)
+    {
+        MainStatusDot.Fill = StatusBrush(status.MainLevel);
+        MainStatusDot.ToolTip = $"主流程：{status.MainText}";
+        DatabaseStatusDot.Fill = StatusBrush(status.DatabaseLevel);
+        DatabaseStatusDot.ToolTip = $"数据库增强：{status.DatabaseText}";
+        GuidedTypingStatusDot.Fill = StatusBrush(status.GuidedTypingLevel);
+        GuidedTypingStatusDot.ToolTip = $"受控代打：{status.GuidedTypingText}";
+    }
+
+    public bool ChangePage(int direction)
+    {
+        if (direction == 0)
+        {
+            return false;
+        }
+
+        RefreshPagination();
+        var targetPage = Math.Clamp(_currentPageIndex + Math.Sign(direction), 0, _pageCount - 1);
+        if (targetPage == _currentPageIndex)
+        {
+            return false;
+        }
+
+        _currentPageIndex = targetPage;
+        ApplyCurrentPage();
+        return true;
+    }
+
+    internal int CurrentPageIndex => _currentPageIndex;
+
+    internal int PageCount => _pageCount;
+
+    internal static int CalculatePageCount(double extentHeight, double pageHeight)
+    {
+        if (!double.IsFinite(extentHeight) || !double.IsFinite(pageHeight) || pageHeight <= 0)
+        {
+            return 1;
+        }
+
+        return Math.Max(1, (int)Math.Ceiling(Math.Max(0, extentHeight - 0.5) / pageHeight));
     }
 
     public void Reposition()
@@ -134,11 +181,103 @@ public partial class TaskbarSuggestionWindow : Window
 
     private void SetGeometry(double left, double top, double width, double height)
     {
+        var geometryChanged = false;
         if (double.IsNaN(Left) || Math.Abs(Left - left) > 0.5) Left = left;
         if (double.IsNaN(Top) || Math.Abs(Top - top) > 0.5) Top = top;
-        if (Math.Abs(Width - width) > 0.5) Width = width;
-        if (Math.Abs(Height - height) > 0.5) Height = height;
+        if (Math.Abs(Width - width) > 0.5)
+        {
+            Width = width;
+            geometryChanged = true;
+        }
+        if (Math.Abs(Height - height) > 0.5)
+        {
+            Height = height;
+            geometryChanged = true;
+        }
+        if (geometryChanged)
+        {
+            QueuePaginationRefresh();
+        }
         KeepAboveWindowsWithoutActivation();
+    }
+
+    private void ResetPagination()
+    {
+        _currentPageIndex = 0;
+        _pageCount = 1;
+        PageIndicator.Visibility = Visibility.Collapsed;
+        PageIndicatorColumn.Width = new GridLength(0);
+        SuggestionScroller.ScrollToTop();
+        QueuePaginationRefresh();
+    }
+
+    private void QueuePaginationRefresh()
+    {
+        if (_paginationRefreshQueued)
+        {
+            return;
+        }
+
+        _paginationRefreshQueued = true;
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+        {
+            _paginationRefreshQueued = false;
+            RefreshPagination();
+        });
+    }
+
+    private void RefreshPagination()
+    {
+        UpdateLayout();
+        _pageHeight = ResolvePageHeight();
+        var pageCountWithoutIndicator = CalculatePageCount(SuggestionScroller.ExtentHeight, _pageHeight);
+        var needsIndicator = pageCountWithoutIndicator > 1;
+        PageIndicator.Text = $"{_currentPageIndex + 1}/{pageCountWithoutIndicator}";
+        PageIndicator.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+        var indicatorWidth = needsIndicator ? Math.Max(30, PageIndicator.DesiredSize.Width + 6) : 0;
+        if ((PageIndicator.Visibility == Visibility.Visible) != needsIndicator ||
+            Math.Abs(PageIndicatorColumn.Width.Value - indicatorWidth) > 0.5)
+        {
+            PageIndicator.Visibility = needsIndicator ? Visibility.Visible : Visibility.Collapsed;
+            PageIndicatorColumn.Width = new GridLength(indicatorWidth);
+            UpdateLayout();
+            _pageHeight = ResolvePageHeight();
+        }
+
+        _pageCount = CalculatePageCount(SuggestionScroller.ExtentHeight, _pageHeight);
+        _currentPageIndex = Math.Clamp(_currentPageIndex, 0, _pageCount - 1);
+        if (_pageCount <= 1)
+        {
+            PageIndicator.Visibility = Visibility.Collapsed;
+            PageIndicatorColumn.Width = new GridLength(0);
+        }
+        ApplyCurrentPage();
+    }
+
+    private double ResolvePageHeight()
+    {
+        var viewportHeight = SuggestionScroller.ViewportHeight;
+        if (!double.IsFinite(viewportHeight) || viewportHeight <= 0)
+        {
+            viewportHeight = SuggestionScroller.ActualHeight;
+        }
+
+        var lineHeight = SuggestionText.LineHeight;
+        if (!double.IsFinite(lineHeight) || lineHeight <= 0)
+        {
+            lineHeight = Math.Max(1, SuggestionText.FontSize * 1.2);
+        }
+
+        var visibleLines = Math.Max(1, (int)Math.Floor((viewportHeight + 0.5) / lineHeight));
+        return visibleLines * lineHeight;
+    }
+
+    private void ApplyCurrentPage()
+    {
+        var maximumOffset = Math.Max(0, SuggestionScroller.ExtentHeight - SuggestionScroller.ViewportHeight);
+        SuggestionScroller.ScrollToVerticalOffset(Math.Min(_currentPageIndex * _pageHeight, maximumOffset));
+        PageIndicator.Text = $"{_currentPageIndex + 1}/{_pageCount}";
+        PageIndicator.Visibility = _pageCount > 1 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void ConfigureToolWindow()
@@ -205,6 +344,15 @@ public partial class TaskbarSuggestionWindow : Window
             return brush;
         }
     }
+
+    private static SolidColorBrush StatusBrush(string level) => level switch
+    {
+        "off" => new SolidColorBrush(Color.FromRgb(127, 140, 141)),
+        "working" => new SolidColorBrush(Color.FromRgb(243, 156, 18)),
+        "ready" => new SolidColorBrush(Color.FromRgb(39, 174, 96)),
+        "error" => new SolidColorBrush(Color.FromRgb(192, 57, 43)),
+        _ => new SolidColorBrush(Color.FromRgb(52, 152, 219))
+    };
 
     private void OpenSettingsMenuItem_OnClick(object sender, RoutedEventArgs e) =>
         SettingsRequested?.Invoke(this, EventArgs.Empty);

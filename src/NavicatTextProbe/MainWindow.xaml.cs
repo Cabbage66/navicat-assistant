@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Interop;
@@ -8,6 +9,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using NavicatTextProbe.Models;
+using NavicatTextProbe.Native;
 using NavicatTextProbe.Services;
 using Color = System.Windows.Media.Color;
 
@@ -26,6 +28,8 @@ public partial class MainWindow : Window
     private readonly NavicatSelectionService _selectionService = new();
     private readonly GlobalHotkeyService _hotkeyService = new();
     private readonly KeyboardFallbackService _keyboardFallbackService = new();
+    private readonly GuidedTypingService _guidedTypingService = new();
+    private readonly MySqlDatabaseService _databaseService = new();
     private readonly MobileServerService _mobileServer = new();
     private readonly TaskbarSuggestionWindow _taskbarWindow = new();
     private readonly TrayIconService _trayIcon;
@@ -34,6 +38,8 @@ public partial class MainWindow : Window
     private readonly Queue<string> _candidateCacheOrder = new();
     private CancellationTokenSource? _predictionCancellation;
     private CancellationTokenSource? _visionCancellation;
+    private CancellationTokenSource? _copyAnswerCancellation;
+    private CancellationTokenSource? _databaseCatalogCancellation;
     private ProbeResult? _lastCapturedProbe;
     private DocumentContextResult? _lastDocumentContext;
     private SuggestionResult _currentSuggestion = SuggestionResult.Info("等待 Navicat SQL、Word 练习题或主动截图……");
@@ -53,6 +59,11 @@ public partial class MainWindow : Window
     private string? _manualCandidateRequestProbeKey;
     private string? _apiKey;
     private string? _visionApiKey;
+    private string? _databasePassword;
+    private DatabaseCatalogSnapshot? _databaseCatalog;
+    private string _databaseStatus = "未使用数据库增强";
+    private string _guidedTypingStatus = "代打关闭";
+    private string _guidedTypingLevel = "off";
     private SuggestionAcceptanceState? _suggestionAcceptance;
     private SuggestionAcceptanceState? _exerciseSuggestionAcceptance;
     private WordExerciseQuestionState? _wordExerciseQuestion;
@@ -61,6 +72,8 @@ public partial class MainWindow : Window
     private string _wordExercisePendingDocumentIdentity = string.Empty;
     private string? _wordExerciseLastProcessedStateKey;
     private bool _wordExerciseCaretOutsideCurrentQuestion;
+    private string? _authorizedWordDocumentIdentity;
+    private string? _lastWordDocumentCompletionContext;
     private ProbeResult? _pendingCaptureLog;
     private DateTimeOffset _pendingCaptureChangedAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastHealthSnapshotAt = DateTimeOffset.MinValue;
@@ -70,6 +83,8 @@ public partial class MainWindow : Window
     private bool _candidateRequestInProgress;
     private bool _visionRequestInProgress;
     private long _visionRequestSequence;
+    private long _copyAnswerRequestSequence;
+    private bool _lastVisionHasReliableCaret;
 
     public MainWindow()
     {
@@ -85,6 +100,7 @@ public partial class MainWindow : Window
         _trayIcon = new TrayIconService();
         _apiKey = SafeReadApiKey();
         _visionApiKey = SafeReadVisionApiKey();
+        _databasePassword = SafeReadDatabasePassword(_settingsService.Current.DatabaseConnection.ProfileId);
 
         LogPathText.Text = $"日志：{Path.GetFileName(_logger.LogPath)}";
         _probeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(550) };
@@ -100,6 +116,7 @@ public partial class MainWindow : Window
 
         _hotkeyService.Pressed += HotkeyService_OnPressed;
         _keyboardFallbackService.InputCaptured += KeyboardFallbackService_OnInputCaptured;
+        _guidedTypingService.StatusChanged += GuidedTypingService_OnStatusChanged;
         _mobileServer.SettingsChanged += MobileServer_OnSettingsChanged;
 
         _trayIcon.OpenRequested += (_, _) => Dispatcher.Invoke(ShowMainWindow);
@@ -121,6 +138,7 @@ public partial class MainWindow : Window
         }
         _lastHealthSnapshotAt = DateTimeOffset.UtcNow;
         await ApplySettingsAsync();
+        await WarmDatabaseCatalogAsync();
         if (_settingsService.Current.AssistantEnabled && _settingsService.Current.MobileServerEnabled)
         {
             await RefreshFirewallStatusAsync();
@@ -207,6 +225,17 @@ public partial class MainWindow : Window
         if (result.Status == DocumentContextStatus.Captured)
         {
             _lastDocumentContext = result;
+            if (_guidedTypingService.IsActive && result.CaretOffset is int documentCaret)
+            {
+                _guidedTypingService.ValidateObservation(
+                    result.WindowHandle,
+                    result.Text,
+                    documentCaret);
+            }
+            if (_copyAnswerCancellation is not null)
+            {
+                return;
+            }
             var documentContentKey = "document|" + result.ContentHash;
             if (!string.Equals(_lastContentHash, documentContentKey, StringComparison.Ordinal))
             {
@@ -228,7 +257,19 @@ public partial class MainWindow : Window
 
         if (result.Status == DocumentContextStatus.Captured && IsWordDocument(result))
         {
-            PrepareForWordExerciseMode();
+            if (!string.Equals(_authorizedWordDocumentIdentity, result.DocumentIdentity, StringComparison.Ordinal))
+            {
+                PrepareForWordExerciseMode();
+            }
+            if (_authorizedWordDocumentIdentity is not null &&
+                !string.Equals(_authorizedWordDocumentIdentity, result.DocumentIdentity, StringComparison.Ordinal))
+            {
+                _authorizedWordDocumentIdentity = null;
+                _lastWordDocumentCompletionContext = null;
+                UpdateSuggestion(SuggestionResult.Info(
+                    $"已切换 Word 文档；按 {_settingsService.Current.SmartActionHotkey} 为当前文档开启 AI 辅助"));
+                return;
+            }
             if ((_wordExerciseQuestion is not null || _wordExerciseLocateRequested) &&
                 !string.Equals(
                     _wordExerciseQuestion?.DocumentIdentity ?? _wordExercisePendingDocumentIdentity,
@@ -298,6 +339,20 @@ public partial class MainWindow : Window
                 }
                 return;
             }
+
+            if (string.Equals(_authorizedWordDocumentIdentity, result.DocumentIdentity, StringComparison.Ordinal))
+            {
+                if (result.HasSelection)
+                {
+                    CancelPredictionForDocumentPreview();
+                    _lastWordDocumentCompletionContext = null;
+                    UpdateSuggestion(SuggestionResult.Info(
+                        $"Word 当前有选区；按 {_settingsService.Current.SmartActionHotkey} 分析选区，取消选区后恢复自动续写"));
+                    return;
+                }
+                ScheduleWordDocumentCompletion(result, immediate: false);
+                return;
+            }
         }
 
         CancelPredictionForDocumentPreview();
@@ -327,6 +382,76 @@ public partial class MainWindow : Window
         _lastExerciseRequestContext = null;
         _exerciseInFlightContext = null;
         _exerciseSuggestionAcceptance = null;
+    }
+
+    private void ScheduleWordDocumentCompletion(DocumentContextResult document, bool immediate)
+    {
+        if (!document.CaretAvailable || document.CaretOffset is not int caret)
+        {
+            UpdateSuggestion(SuggestionResult.Info("Word 暂未提供可靠光标，已暂停文档续写。"));
+            return;
+        }
+        if (!_settingsService.Current.AiEnabled || string.IsNullOrWhiteSpace(_apiKey))
+        {
+            UpdateSuggestion(SuggestionResult.Info("请先开启 AI 并保存 DeepSeek API Key。"));
+            return;
+        }
+
+        var contextKey = $"word_document|{document.DocumentIdentity}|{document.ContentHash}|{caret}";
+        if (!immediate && string.Equals(contextKey, _lastWordDocumentCompletionContext, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastWordDocumentCompletionContext = contextKey;
+        _predictionCancellation?.Cancel();
+        _predictionCancellation?.Dispose();
+        _predictionCancellation = new CancellationTokenSource();
+        RunWordDocumentCompletionAsync(
+            document,
+            contextKey,
+            immediate,
+            _predictionCancellation.Token).Forget();
+    }
+
+    private async Task RunWordDocumentCompletionAsync(
+        DocumentContextResult document,
+        string contextKey,
+        bool immediate,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!immediate)
+            {
+                await Task.Delay(_settingsService.Current.PredictionDebounceMilliseconds, cancellationToken);
+            }
+            var stopwatch = Stopwatch.StartNew();
+            var result = await _deepSeekClient.CompleteAsync(
+                _settingsService.Current,
+                _apiKey!,
+                PromptTemplates.BuildWordDocumentCompletionPrompt(document),
+                cancellationToken,
+                maxTokens: 900,
+                systemPrompt: PromptTemplates.DefaultWordWritingSystemPrompt);
+            stopwatch.Stop();
+            if (cancellationToken.IsCancellationRequested ||
+                !string.Equals(contextKey, _lastWordDocumentCompletionContext, StringComparison.Ordinal) ||
+                !string.Equals(_authorizedWordDocumentIdentity, document.DocumentIdentity, StringComparison.Ordinal) ||
+                _lastDocumentContext is not { } current ||
+                !WordExerciseContextBuilder.IsSameObservation(document, current))
+            {
+                return;
+            }
+
+            result = result with { Origin = "word_document" };
+            _logger.WriteSuggestion("word_document_completion", document.Text.Length, stopwatch.ElapsedMilliseconds, result);
+            UpdateSuggestion(result);
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer Word observation superseded this request.
+        }
     }
 
     private void ScheduleWordExercise(
@@ -906,6 +1031,13 @@ public partial class MainWindow : Window
                         $"光标：第 {result.CaretLine?.ToString() ?? "?"} 行，第 {result.CaretColumn?.ToString() ?? "?"} 列";
                 }
                 _lastCapturedProbe = result;
+                if (_guidedTypingService.IsActive && result.CaretOffset is int probeCaret)
+                {
+                    _guidedTypingService.ValidateObservation(
+                        result.WindowHandle,
+                        result.Text,
+                        probeCaret);
+                }
 
                 var contentChanged = !string.Equals(_lastContentHash, result.ContentHash, StringComparison.Ordinal);
                 if (contentChanged)
@@ -998,7 +1130,7 @@ public partial class MainWindow : Window
 
     private void SchedulePrediction(ProbeResult probe, bool immediate = false)
     {
-        if (!_settingsService.Current.AssistantEnabled)
+        if (!_settingsService.Current.AssistantEnabled || _copyAnswerCancellation is not null)
         {
             return;
         }
@@ -1093,10 +1225,10 @@ public partial class MainWindow : Window
 
             _lastCompletionRequestStarted = DateTimeOffset.UtcNow;
             var stopwatch = Stopwatch.StartNew();
-            var result = await _deepSeekClient.CompleteAsync(
-                _settingsService.Current,
-                _apiKey!,
-                PromptTemplates.BuildCompletionPrompt(probe),
+            var prompt = PromptTemplates.BuildCompletionPrompt(probe);
+            var result = await CompleteSqlRequestAsync(
+                prompt,
+                () => string.Equals(contextKey, _lastPredictionContext, StringComparison.Ordinal),
                 cancellationToken);
             result = SqlContextAnalyzer.GuardAutomaticResult(probe, result);
             stopwatch.Stop();
@@ -1124,6 +1256,152 @@ public partial class MainWindow : Window
             {
                 _predictionInFlightContext = null;
             }
+        }
+    }
+
+    private async Task<SuggestionResult> CompleteSqlRequestAsync(
+        string prompt,
+        Func<bool> contextIsCurrent,
+        CancellationToken cancellationToken,
+        int maxTokens = 500,
+        double temperature = 0.2,
+        string? systemPrompt = null)
+    {
+        var databaseSettings = _settingsService.Current.DatabaseConnection;
+        if (databaseSettings.Enabled && !string.IsNullOrEmpty(_databasePassword))
+        {
+            try
+            {
+                _databaseStatus = "正在准备缓存数据库目录";
+                RefreshRuntimeIndicators();
+                var catalog = _databaseCatalog;
+                if (catalog is null)
+                {
+                    catalog = await _databaseService.GetCatalogSnapshotAsync(
+                        databaseSettings,
+                        _databasePassword,
+                        cancellationToken);
+                    _databaseCatalog = catalog;
+                }
+                else if (DateTimeOffset.UtcNow - catalog.LoadedAt >= MySqlDatabaseService.CatalogCacheLifetime &&
+                         _databaseCatalogCancellation is null)
+                {
+                    WarmDatabaseCatalogAsync(forceRefresh: true, reportStatus: false).Forget();
+                }
+                EnsureDatabaseToolContext(contextIsCurrent, cancellationToken);
+                var assisted = await _deepSeekClient.CompleteWithDatabaseToolsAsync(
+                    _settingsService.Current,
+                    _apiKey!,
+                    prompt,
+                    catalog,
+                    (request, requestNumber, token) => ExecuteDatabaseToolAsync(
+                        request,
+                        requestNumber,
+                        catalog,
+                        contextIsCurrent,
+                        token),
+                    cancellationToken,
+                    maxTokens,
+                    temperature,
+                    systemPrompt);
+                if (assisted.Suggestion.Mode == SuggestionMode.Error)
+                {
+                    // 数据库工具会话失败（例如 DeepSeek 超时）时降级普通 AI 补全，
+                    // 由 CompleteAsync 内部的智谱 GLM 冗余继续兜底。
+                    _databaseStatus = "数据库工具会话失败，已降级普通 AI 补全";
+                    RefreshRuntimeIndicators();
+                    _logger.WriteDatabaseContext(false, 0, false, assisted.Suggestion.DisplayText);
+                }
+                else
+                {
+                    _databaseStatus = assisted.Message;
+                    RefreshRuntimeIndicators();
+                    return assisted.Suggestion;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _databaseStatus = $"数据库目录不可用，已降级普通 AI：{ex.Message}";
+                RefreshRuntimeIndicators();
+                _logger.WriteDatabaseContext(false, 0, false, ex.Message);
+            }
+        }
+        else if (databaseSettings.Enabled)
+        {
+            _databaseStatus = "数据库增强未启用工具：未保存数据库密码";
+            RefreshRuntimeIndicators();
+        }
+
+        return await _deepSeekClient.CompleteAsync(
+            _settingsService.Current,
+            _apiKey!,
+            prompt,
+            cancellationToken,
+            maxTokens,
+            temperature,
+            systemPrompt: systemPrompt);
+    }
+
+    private async Task<DatabaseContextResult> ExecuteDatabaseToolAsync(
+        DatabaseToolRequest request,
+        int requestNumber,
+        DatabaseCatalogSnapshot catalog,
+        Func<bool> contextIsCurrent,
+        CancellationToken cancellationToken)
+    {
+        var settings = _settingsService.Current.DatabaseConnection;
+        if (string.IsNullOrEmpty(_databasePassword))
+        {
+            _databaseStatus = "数据库增强失败：未保存数据库密码";
+            RefreshRuntimeIndicators();
+            return DatabaseContextResult.Failure("请在设置中保存数据库密码。");
+        }
+
+        try
+        {
+            EnsureDatabaseToolContext(contextIsCurrent, cancellationToken);
+            _databaseStatus = $"AI 正在调用只读数据库工具（{requestNumber}/2）";
+            StatusText.Text = _databaseStatus;
+            RefreshRuntimeIndicators();
+            var result = await _databaseService.ExecuteReadOnlyAsync(
+                settings,
+                _databasePassword,
+                new DatabaseQueryPlan(true, request.Sql, request.Purpose, string.Empty),
+                catalog.Summary,
+                cancellationToken);
+            EnsureDatabaseToolContext(contextIsCurrent, cancellationToken);
+            _databaseStatus = result.IsSuccess
+                ? $"AI 已完成第 {requestNumber} 次只读查询"
+                : $"第 {requestNumber} 次只读查询被拒绝或失败";
+            RefreshRuntimeIndicators();
+            _logger.WriteDatabaseContext(result.IsSuccess, result.RowCount, result.WasTruncated, result.Message);
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _databaseStatus = $"数据库增强失败：{ex.Message}";
+            RefreshRuntimeIndicators();
+            _logger.WriteDatabaseContext(false, 0, false, ex.Message);
+            return DatabaseContextResult.Failure(ex.Message);
+        }
+    }
+
+    private static void EnsureDatabaseToolContext(
+        Func<bool> contextIsCurrent,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!contextIsCurrent())
+        {
+            throw new OperationCanceledException(cancellationToken);
         }
     }
 
@@ -1200,13 +1478,12 @@ public partial class MainWindow : Window
         try
         {
             var stopwatch = Stopwatch.StartNew();
-            var result = await _deepSeekClient.CompleteAsync(
-                _settingsService.Current,
-                _apiKey,
+            var result = await CompleteSqlRequestAsync(
                 PromptTemplates.BuildCandidateContinuationPrompt(probe),
+                () => string.Equals(_manualCandidateRequestProbeKey, probeKey, StringComparison.Ordinal),
                 token,
-                maxTokens: 1800,
-                temperature: 0.35);
+                1800,
+                0.35);
             result = SqlContextAnalyzer.RankCandidates(probe, result);
             stopwatch.Stop();
             if (token.IsCancellationRequested)
@@ -1311,7 +1588,9 @@ public partial class MainWindow : Window
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            var capture = await _visionScreenshotCaptureService.CaptureAsync(token);
+            var capture = await _visionScreenshotCaptureService.CaptureAsync(
+                token,
+                _settingsService.Current.VisionCaptureScope);
             if (token.IsCancellationRequested || requestSequence != Volatile.Read(ref _visionRequestSequence))
             {
                 return;
@@ -1323,6 +1602,7 @@ public partial class MainWindow : Window
                 UpdateSuggestion(SuggestionResult.Error("无法截图识别当前题目", capture.Message));
                 return;
             }
+            _lastVisionHasReliableCaret = capture.HasReliableCaret;
 
             UpdateSuggestion(SuggestionResult.Loading("正在识别截图中光标所在题目……"));
             var result = await _zhipuVisionClient.AnswerExerciseAsync(
@@ -1469,12 +1749,11 @@ public partial class MainWindow : Window
                 ? completeProbe.Text
                 : selectedSql;
             var stopwatch = Stopwatch.StartNew();
-            var result = await _deepSeekClient.CompleteAsync(
-                _settingsService.Current,
-                _apiKey,
+            var result = await CompleteSqlRequestAsync(
                 PromptTemplates.BuildDiagnosisPrompt(selectedSql, fullDocument),
+                () => !token.IsCancellationRequested,
                 token,
-                maxTokens: 2200);
+                2200);
             stopwatch.Stop();
             if (!token.IsCancellationRequested)
             {
@@ -1520,6 +1799,7 @@ public partial class MainWindow : Window
             _settingsService.Current.TaskbarStyle,
             _settingsService.Current.TaskbarWidth);
         _mobileServer.UpdateSuggestion(suggestion, _settingsService.Current);
+        RefreshRuntimeIndicators();
     }
 
     private void UpdateMainSuggestionView(SuggestionResult suggestion)
@@ -1542,6 +1822,8 @@ public partial class MainWindow : Window
         SuggestionInsertTextBox.Text = string.IsNullOrWhiteSpace(suggestion.InsertText) ? "—" : suggestion.InsertText;
         IssuesText.Text = suggestion.HasCandidates
             ? $"再次按 {_settingsService.Current.CycleCandidatesHotkey} 切换下一个候选；当前为第 {suggestion.ActiveCandidateIndex + 1} 个，共 {suggestion.Candidates.Count} 个。"
+            : suggestion.Origin.StartsWith("clipboard_question", StringComparison.Ordinal)
+                ? $"剪贴板题目已经回答；按 Ctrl+V 粘贴答案。再次复制一道题后按 {_settingsService.Current.AnswerClipboardQuestionHotkey} 可继续。"
             : string.Equals(suggestion.Origin, "vision_screenshot", StringComparison.Ordinal)
                 ? $"视觉截图结果；把光标放到其他题目后按 {_settingsService.Current.VisionScreenshotHotkey} 可重新识别。"
             : suggestion.Mode == SuggestionMode.ExerciseAnswer
@@ -1662,23 +1944,101 @@ public partial class MainWindow : Window
 
         RegisterHotkeys();
         UpdateChannelStatus();
+        RefreshRuntimeIndicators();
+    }
+
+    private async Task WarmDatabaseCatalogAsync(bool forceRefresh = false, bool reportStatus = true)
+    {
+        _databaseCatalogCancellation?.Cancel();
+        _databaseCatalogCancellation?.Dispose();
+        _databaseCatalogCancellation = null;
+
+        var settings = _settingsService.Current;
+        if (!settings.AssistantEnabled || !settings.DatabaseConnection.Enabled)
+        {
+            _databaseCatalog = null;
+            _databaseStatus = "数据库增强未开启";
+            RefreshRuntimeIndicators();
+            return;
+        }
+        if (string.IsNullOrEmpty(_databasePassword))
+        {
+            _databaseCatalog = null;
+            _databaseStatus = "数据库增强未就绪：未保存数据库密码";
+            RefreshRuntimeIndicators();
+            return;
+        }
+
+        var cancellation = new CancellationTokenSource();
+        var cancellationToken = cancellation.Token;
+        _databaseCatalogCancellation = cancellation;
+        try
+        {
+            if (reportStatus)
+            {
+                _databaseStatus = "正在预热可访问数据库目录";
+                RefreshRuntimeIndicators();
+            }
+            var catalog = await _databaseService.GetCatalogSnapshotAsync(
+                settings.DatabaseConnection,
+                _databasePassword,
+                cancellationToken,
+                forceRefresh);
+            cancellationToken.ThrowIfCancellationRequested();
+            _databaseCatalog = catalog;
+            if (reportStatus)
+            {
+                _databaseStatus = $"数据库目录已缓存：{catalog.SchemaCount} 库 / {catalog.TableCount} 表" +
+                                  (catalog.WasTruncated ? "（已裁剪）" : string.Empty);
+                RefreshRuntimeIndicators();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Settings changed, Assistant stopped, or the application exited.
+        }
+        catch (Exception ex)
+        {
+            _logger.WriteDatabaseContext(false, 0, false, ex.Message);
+            if (reportStatus)
+            {
+                _databaseCatalog = null;
+                _databaseStatus = $"数据库目录预热失败：{ex.Message}";
+                RefreshRuntimeIndicators();
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_databaseCatalogCancellation, cancellation))
+            {
+                _databaseCatalogCancellation = null;
+            }
+            cancellation.Dispose();
+        }
     }
 
     private void StopAssistantActivity()
     {
         _probeTimer.Stop();
         _keyboardFallbackService.Stop();
+        _guidedTypingService.Stop("Assistant 已关闭，受控逐字代打已停止。");
         CancelVisionRequest();
+        CancelCopyAnswerRequest();
         _predictionCancellation?.Cancel();
         _predictionCancellation?.Dispose();
         _predictionCancellation = null;
+        _databaseCatalogCancellation?.Cancel();
+        _databaseCatalogCancellation?.Dispose();
+        _databaseCatalogCancellation = null;
         _predictionInFlightContext = null;
         ClearWordExerciseSession(cancelRequest: false);
+        _authorizedWordDocumentIdentity = null;
+        _lastWordDocumentCompletionContext = null;
         _candidateRequestInProgress = false;
         _manualCandidateRequestProbeKey = null;
         FlushPendingCaptureLog(force: true);
         StatusText.Text = "Assistant 已关闭";
-        DetailText.Text = $"探测、AI、任务栏提示和手机服务均已停止；按 {_settingsService.Current.ToggleAssistantHotkey} 重新开启。";
+        DetailText.Text = $"探测、AI、数据库读取、OCR、代打、任务栏提示和手机服务均已停止；按 {_settingsService.Current.ToggleAssistantHotkey} 重新开启。";
         StatusDot.Fill = Brush(127, 140, 141);
     }
 
@@ -1692,9 +2052,17 @@ public partial class MainWindow : Window
         };
         if (settings.AssistantEnabled)
         {
+            shortcuts[HotkeyAction.SmartAnalyze] = settings.SmartActionHotkey;
+            shortcuts[HotkeyAction.CopyFullAnswer] = settings.CopyFullAnswerHotkey;
+            shortcuts[HotkeyAction.AnswerClipboardQuestion] = settings.AnswerClipboardQuestionHotkey;
             shortcuts[HotkeyAction.CycleCandidates] = settings.CycleCandidatesHotkey;
-            shortcuts[HotkeyAction.AnalyzeSelection] = settings.AnalyzeSelectionHotkey;
-            shortcuts[HotkeyAction.IdentifyWordExercise] = settings.WordExerciseHotkey;
+            shortcuts[HotkeyAction.ToggleMobile] = settings.ToggleMobileHotkey;
+            if (settings.GuidedTypingEnabled)
+            {
+                shortcuts[HotkeyAction.ToggleGuidedTyping] = settings.GuidedTypingHotkey;
+            }
+            shortcuts[HotkeyAction.PreviousTaskbarPage] = "Win+PageUp";
+            shortcuts[HotkeyAction.NextTaskbarPage] = "Win+PageDown";
             if (settings.VisionEnabled)
             {
                 shortcuts[HotkeyAction.CaptureVisionExercise] = settings.VisionScreenshotHotkey;
@@ -1704,26 +2072,42 @@ public partial class MainWindow : Window
         var errors = _hotkeyService.Register(new WindowInteropHelper(this).Handle, shortcuts);
         HotkeyStatusText.Text = errors.Count == 0
             ? settings.AssistantEnabled
-                ? $"整体启停：{settings.ToggleAssistantHotkey} | SQL 候选：{settings.CycleCandidatesHotkey} | SQL 诊断：{settings.AnalyzeSelectionHotkey} | Word 识别/切题：{settings.WordExerciseHotkey} | 截图识题：{settings.VisionScreenshotHotkey}"
-                : $"整体启停：{settings.ToggleAssistantHotkey}（其余快捷键已停用）"
+                ? $"独占快捷键 | 总开关：{settings.ToggleAssistantHotkey} | 智能分析：{settings.SmartActionHotkey} | 当前题答案：{settings.CopyFullAnswerHotkey} | 剪贴板题目：{settings.AnswerClipboardQuestionHotkey} | OCR：{settings.VisionScreenshotHotkey} | 代打：{settings.GuidedTypingHotkey} | 手机：{settings.ToggleMobileHotkey} | 候选：{settings.CycleCandidatesHotkey} | 翻页：Win+PageUp/PageDown"
+                : $"独占整体启停：{settings.ToggleAssistantHotkey}（其余快捷键已停用）"
             : string.Join("；", errors);
     }
 
     private void HotkeyService_OnPressed(object? sender, HotkeyAction action)
     {
-        if (action is not HotkeyAction.CaptureVisionExercise and not HotkeyAction.ToggleAssistant)
+        if (action is HotkeyAction.CycleCandidates or
+            HotkeyAction.SmartAnalyze or
+            HotkeyAction.CopyFullAnswer or
+            HotkeyAction.AnswerClipboardQuestion)
         {
             CancelVisionRequest();
+        }
+        if (action is HotkeyAction.CycleCandidates or
+            HotkeyAction.SmartAnalyze or
+            HotkeyAction.CaptureVisionExercise)
+        {
+            CancelCopyAnswerRequest();
         }
         switch (action)
         {
             case HotkeyAction.ToggleAssistant:
                 SetAssistantEnabledAsync(!_settingsService.Current.AssistantEnabled).Forget();
                 break;
+            case HotkeyAction.SmartAnalyze: SmartAnalyzeAsync().Forget(); break;
+            case HotkeyAction.CopyFullAnswer: CopyFullAnswerAsync().Forget(); break;
+            case HotkeyAction.AnswerClipboardQuestion: AnswerClipboardQuestionAsync().Forget(); break;
+            case HotkeyAction.ToggleGuidedTyping: ToggleGuidedTyping(); break;
+            case HotkeyAction.ToggleMobile: ToggleMobileAsync().Forget(); break;
             case HotkeyAction.CycleCandidates: CycleCandidatesAsync().Forget(); break;
             case HotkeyAction.AnalyzeSelection: AnalyzeSelectionAsync(true).Forget(); break;
             case HotkeyAction.IdentifyWordExercise: IdentifyWordExerciseAsync().Forget(); break;
             case HotkeyAction.CaptureVisionExercise: CaptureVisionExerciseAsync().Forget(); break;
+            case HotkeyAction.PreviousTaskbarPage: _taskbarWindow.ChangePage(-1); break;
+            case HotkeyAction.NextTaskbarPage: _taskbarWindow.ChangePage(1); break;
         }
     }
 
@@ -1766,6 +2150,706 @@ public partial class MainWindow : Window
         });
     }
 
+    private void GuidedTypingService_OnStatusChanged(object? sender, GuidedTypingStatus status)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (!status.IsActive)
+            {
+                _guidedTypingService.Stop(status.Message);
+            }
+            _guidedTypingStatus = status.IsActive
+                ? $"代打 {status.ConsumedElements}/{status.TotalElements}"
+                : status.IsComplete ? "代打完成" : "代打关闭";
+            _guidedTypingLevel = status.IsActive
+                ? "ready"
+                : status.Message.Contains("无法", StringComparison.Ordinal) ||
+                  status.Message.Contains("偏离", StringComparison.Ordinal) ||
+                  status.Message.Contains("变化", StringComparison.Ordinal)
+                    ? "error"
+                    : "off";
+            DetailText.Text = status.Message;
+            UpdateChannelStatus();
+            RefreshRuntimeIndicators();
+        });
+    }
+
+    private async Task CopyFullAnswerAsync()
+    {
+        if (!_settingsService.Current.AssistantEnabled)
+        {
+            UpdateSuggestion(SuggestionResult.Info(
+                $"Assistant 已关闭；按 {_settingsService.Current.ToggleAssistantHotkey} 开启"));
+            return;
+        }
+
+        CancelCopyAnswerRequest();
+        CancelVisionRequest();
+        _predictionCancellation?.Cancel();
+        _predictionCancellation?.Dispose();
+        _predictionCancellation = null;
+        _predictionInFlightContext = null;
+        _guidedTypingService.Stop("正在获取新的完整答案，旧代打会话已停止。");
+
+        var cancellation = new CancellationTokenSource();
+        var token = cancellation.Token;
+        var requestSequence = Interlocked.Increment(ref _copyAnswerRequestSequence);
+        _copyAnswerCancellation = cancellation;
+        UpdateSuggestion(SuggestionResult.Loading("正在获取当前题目的完整答案并准备复制……"));
+
+        try
+        {
+            SuggestionResult result;
+            var source = "screen_ocr";
+            var sqlAnswer = false;
+            var document = await _documentContextProbeService.CaptureForegroundAsync();
+            token.ThrowIfCancellationRequested();
+            if (document.Status == DocumentContextStatus.Captured && IsWordDocument(document))
+            {
+                source = "word_exercise";
+                result = await GetWordClipboardAnswerAsync(document, requestSequence, token);
+            }
+            else
+            {
+                var probe = await Task.Run(
+                    () => _probeService.CaptureForegroundNavicat(forceRefresh: true),
+                    token);
+                token.ThrowIfCancellationRequested();
+                if (probe.Status == ProbeStatus.Captured && !probe.IsTruncated)
+                {
+                    source = "navicat_sql";
+                    sqlAnswer = true;
+                    result = await GetNavicatClipboardAnswerAsync(probe, requestSequence, token);
+                }
+                else
+                {
+                    result = await GetVisionClipboardAnswerAsync(requestSequence, token);
+                }
+            }
+
+            EnsureCopyAnswerRequestCurrent(requestSequence, token);
+            if (result.Mode == SuggestionMode.Error)
+            {
+                UpdateSuggestion(result);
+                _logger.WriteClipboardAnswer(source, "无可用答案", 0, false);
+                return;
+            }
+
+            var answer = ClipboardAnswerService.Select(result, sqlAnswer);
+            if (answer is null)
+            {
+                UpdateSuggestion(SuggestionResult.Error(
+                    "没有可复制的完整答案",
+                    string.IsNullOrWhiteSpace(result.Explanation)
+                        ? "模型没有返回可靠的完整答案，请把光标放在题目或 SQL TODO 内重试。"
+                        : result.Explanation));
+                _logger.WriteClipboardAnswer(source, "空答案", 0, false);
+                return;
+            }
+
+            if (!await TrySetClipboardTextAsync(answer.Text, token))
+            {
+                UpdateSuggestion(SuggestionResult.Error(
+                    "完整答案已生成，但剪贴板正被其他程序占用",
+                    "请关闭正在读取剪贴板的程序后再次按复制快捷键。"));
+                _logger.WriteClipboardAnswer(source, answer.Kind, answer.CharacterCount, false);
+                return;
+            }
+
+            EnsureCopyAnswerRequestCurrent(requestSequence, token);
+            var copyMessage = $"{answer.Kind}已复制（{answer.CharacterCount:N0} 字符），可按 Ctrl+V 粘贴";
+            result = result with
+            {
+                DisplayText = copyMessage,
+                InsertText = answer.Text,
+                FullAnswer = answer.Text,
+                Explanation = string.IsNullOrWhiteSpace(result.Explanation)
+                    ? copyMessage
+                    : result.Explanation.Trim() + Environment.NewLine + Environment.NewLine + copyMessage
+            };
+            UpdateSuggestion(result);
+            _logger.WriteClipboardAnswer(source, answer.Kind, answer.CharacterCount, true);
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer copy request, context change, global stop, or application exit superseded this request.
+        }
+        catch (Exception ex)
+        {
+            if (IsCopyAnswerRequestCurrent(requestSequence))
+            {
+                UpdateSuggestion(SuggestionResult.Error(
+                    "获取完整答案失败",
+                    ex.Message));
+                _logger.WriteClipboardAnswer("unknown", ex.GetType().Name, 0, false);
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_copyAnswerCancellation, cancellation))
+            {
+                _copyAnswerCancellation = null;
+            }
+            cancellation.Dispose();
+        }
+    }
+
+    private async Task AnswerClipboardQuestionAsync()
+    {
+        if (!_settingsService.Current.AssistantEnabled)
+        {
+            UpdateSuggestion(SuggestionResult.Info(
+                $"Assistant 已关闭；按 {_settingsService.Current.ToggleAssistantHotkey} 开启"));
+            return;
+        }
+
+        CancelCopyAnswerRequest();
+        CancelVisionRequest();
+        _predictionCancellation?.Cancel();
+        _predictionCancellation?.Dispose();
+        _predictionCancellation = null;
+        _predictionInFlightContext = null;
+        _guidedTypingService.Stop("正在回答剪贴板题目，旧代打会话已停止。");
+
+        var cancellation = new CancellationTokenSource();
+        var token = cancellation.Token;
+        var requestSequence = Interlocked.Increment(ref _copyAnswerRequestSequence);
+        _copyAnswerCancellation = cancellation;
+        UpdateSuggestion(SuggestionResult.Loading("正在识别剪贴板中的题目并准备答案……"));
+
+        try
+        {
+            var clipboardText = await TryGetClipboardTextAsync(token);
+            EnsureCopyAnswerRequestCurrent(requestSequence, token);
+            if (clipboardText is null)
+            {
+                UpdateSuggestion(SuggestionResult.Error(
+                    "暂时无法读取剪贴板",
+                    "剪贴板正被其他程序占用，请稍后再按剪贴板题目快捷键。"));
+                _logger.WriteClipboardAnswer("clipboard_question", "读取失败", 0, false);
+                return;
+            }
+            if (!ClipboardAnswerService.TryNormalizeQuestion(clipboardText, out var question, out var questionError))
+            {
+                UpdateSuggestion(SuggestionResult.Error("无法识别剪贴板题目", questionError));
+                _logger.WriteClipboardAnswer("clipboard_question", "无有效题目", 0, false);
+                return;
+            }
+            if (!_settingsService.Current.AiEnabled || string.IsNullOrWhiteSpace(_apiKey))
+            {
+                UpdateSuggestion(SuggestionResult.Error("请先开启 AI 并保存 DeepSeek API Key"));
+                _logger.WriteClipboardAnswer("clipboard_question", "AI 未配置", 0, false);
+                return;
+            }
+
+            var result = await CompleteSqlRequestAsync(
+                PromptTemplates.BuildClipboardQuestionAnswerPrompt(question),
+                () => IsCopyAnswerRequestCurrent(requestSequence),
+                token,
+                maxTokens: 4000,
+                temperature: 0.1,
+                systemPrompt: PromptTemplates.BuildClipboardQuestionSystemPrompt(_settingsService.Current));
+            EnsureCopyAnswerRequestCurrent(requestSequence, token);
+            if (result.Mode == SuggestionMode.Error)
+            {
+                UpdateSuggestion(result);
+                _logger.WriteClipboardAnswer("clipboard_question", "模型失败", 0, false);
+                return;
+            }
+            if (!result.IsQuestion)
+            {
+                UpdateSuggestion(SuggestionResult.Error(
+                    "剪贴板内容不像 SQL 或数据库题目",
+                    string.IsNullOrWhiteSpace(result.Explanation)
+                        ? "请复制完整题干后重试。"
+                        : result.Explanation));
+                _logger.WriteClipboardAnswer("clipboard_question", "非数据库题目", 0, false);
+                return;
+            }
+
+            var answer = ClipboardAnswerService.Select(result, sqlAnswer: false);
+            if (answer is null)
+            {
+                UpdateSuggestion(SuggestionResult.Error(
+                    "没有生成可复制的完整答案",
+                    string.IsNullOrWhiteSpace(result.Explanation)
+                        ? "请确认剪贴板中包含完整题干。"
+                        : result.Explanation));
+                _logger.WriteClipboardAnswer("clipboard_question", "空答案", 0, false);
+                return;
+            }
+
+            var currentClipboardText = await TryGetClipboardTextAsync(token);
+            EnsureCopyAnswerRequestCurrent(requestSequence, token);
+            if (currentClipboardText is null)
+            {
+                UpdateSuggestion(SuggestionResult.Error(
+                    "答案已生成，但暂时无法写入剪贴板",
+                    "剪贴板正被其他程序占用，原题没有被覆盖。"));
+                _logger.WriteClipboardAnswer("clipboard_question", answer.Kind, answer.CharacterCount, false);
+                return;
+            }
+            if (!string.Equals(currentClipboardText.Trim(), question, StringComparison.Ordinal))
+            {
+                UpdateSuggestion(SuggestionResult.Error(
+                    "剪贴板内容已变化，未覆盖新内容",
+                    "回答期间检测到你复制了其他内容；请确认后重新触发。"));
+                _logger.WriteClipboardAnswer("clipboard_question", answer.Kind, answer.CharacterCount, false);
+                return;
+            }
+            if (!await TrySetClipboardTextAsync(answer.Text, token))
+            {
+                UpdateSuggestion(SuggestionResult.Error(
+                    "答案已生成，但剪贴板正被其他程序占用",
+                    "原题没有被覆盖，请稍后再次按剪贴板题目快捷键。"));
+                _logger.WriteClipboardAnswer("clipboard_question", answer.Kind, answer.CharacterCount, false);
+                return;
+            }
+
+            EnsureCopyAnswerRequestCurrent(requestSequence, token);
+            var copyMessage = $"{answer.Kind}已覆盖剪贴板原题（{answer.CharacterCount:N0} 字符），可按 Ctrl+V 粘贴";
+            var origin = string.Equals(result.Origin, "database_grounded", StringComparison.Ordinal)
+                ? "clipboard_question_database_grounded"
+                : "clipboard_question";
+            result = result with
+            {
+                Origin = origin,
+                DisplayText = copyMessage,
+                InsertText = answer.Text,
+                FullAnswer = answer.Text,
+                QuestionText = string.Empty,
+                DetectedUserAnswer = string.Empty,
+                Explanation = string.IsNullOrWhiteSpace(result.Explanation)
+                    ? copyMessage
+                    : result.Explanation.Trim() + Environment.NewLine + Environment.NewLine + copyMessage
+            };
+            UpdateSuggestion(result);
+            _logger.WriteClipboardAnswer("clipboard_question", answer.Kind, answer.CharacterCount, true);
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer answer request, global stop, or application exit superseded this request.
+        }
+        catch (Exception ex)
+        {
+            if (IsCopyAnswerRequestCurrent(requestSequence))
+            {
+                UpdateSuggestion(SuggestionResult.Error("回答剪贴板题目失败", ex.Message));
+                _logger.WriteClipboardAnswer("clipboard_question", ex.GetType().Name, 0, false);
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_copyAnswerCancellation, cancellation))
+            {
+                _copyAnswerCancellation = null;
+            }
+            cancellation.Dispose();
+        }
+    }
+
+    private async Task<SuggestionResult> GetNavicatClipboardAnswerAsync(
+        ProbeResult probe,
+        long requestSequence,
+        CancellationToken cancellationToken)
+    {
+        if (!_settingsService.Current.AiEnabled || string.IsNullOrWhiteSpace(_apiKey))
+        {
+            return SuggestionResult.Error("请先开启 AI 并保存 DeepSeek API Key");
+        }
+
+        _lastCapturedProbe = probe;
+        var expectedProbeKey = BuildProbeKey(probe);
+        var expectedWindow = probe.WindowHandle;
+        bool ContextIsCurrent() =>
+            IsCopyAnswerRequestCurrent(requestSequence) &&
+            IsForegroundRoot(expectedWindow) &&
+            _lastCapturedProbe is { } latest &&
+            latest.WindowHandle == expectedWindow &&
+            string.Equals(BuildProbeKey(latest), expectedProbeKey, StringComparison.Ordinal);
+
+        var result = await CompleteSqlRequestAsync(
+            PromptTemplates.BuildFullSqlAnswerPrompt(probe),
+            ContextIsCurrent,
+            cancellationToken,
+            maxTokens: 4000,
+            temperature: 0.1);
+        EnsureCopyAnswerRequestCurrent(requestSequence, cancellationToken);
+
+        var current = await Task.Run(
+            () => _probeService.CaptureForegroundNavicat(forceRefresh: true),
+            cancellationToken);
+        if (current.Status != ProbeStatus.Captured ||
+            current.IsTruncated ||
+            current.WindowHandle != expectedWindow ||
+            !string.Equals(BuildProbeKey(current), expectedProbeKey, StringComparison.Ordinal))
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        return result with { Origin = "clipboard_navicat_sql" };
+    }
+
+    private async Task<SuggestionResult> GetWordClipboardAnswerAsync(
+        DocumentContextResult document,
+        long requestSequence,
+        CancellationToken cancellationToken)
+    {
+        if (!document.CaretAvailable || document.CaretOffset is null)
+        {
+            return SuggestionResult.Error("Word 暂未提供可靠光标", "请把光标放到当前 SQL/数据库题目内重试。");
+        }
+        if (!_settingsService.Current.AiEnabled || string.IsNullOrWhiteSpace(_apiKey))
+        {
+            return SuggestionResult.Error("请先开启 AI 并保存 DeepSeek API Key");
+        }
+
+        int[] radii =
+        [
+            WordExerciseContextBuilder.InitialRadius,
+            WordExerciseContextBuilder.FirstExpandedRadius,
+            WordExerciseContextBuilder.FinalExpandedRadius
+        ];
+        SuggestionResult? result = null;
+        WordExerciseQuestionState? question = null;
+        string failure = "未能完整识别当前题目。";
+        for (var attempt = 0; attempt < radii.Length; attempt++)
+        {
+            EnsureCopyAnswerRequestCurrent(requestSequence, cancellationToken);
+            var context = WordExerciseContextBuilder.Build(
+                document,
+                WordExerciseRequestMode.LocateAndAnswer,
+                radii[attempt],
+                attempt);
+            if (context is null)
+            {
+                return SuggestionResult.Error("Word 当前没有可靠正文或光标");
+            }
+
+            result = await _deepSeekClient.CompleteAsync(
+                _settingsService.Current,
+                _apiKey,
+                PromptTemplates.BuildWordExercisePrompt(context),
+                cancellationToken,
+                maxTokens: 3000,
+                temperature: 0.1,
+                systemPrompt: PromptTemplates.BuildExerciseSystemPrompt(_settingsService.Current));
+            EnsureCopyAnswerRequestCurrent(requestSequence, cancellationToken);
+            if (result.Mode == SuggestionMode.Error)
+            {
+                return result;
+            }
+            if (!result.IsQuestion && result.ContextComplete)
+            {
+                return SuggestionResult.Error(
+                    "当前光标处不像 SQL/数据库练习题",
+                    result.Explanation);
+            }
+
+            var needsExpansion = WordExerciseContextBuilder.NeedsExpandedContext(context, result);
+            if (!needsExpansion && WordExerciseContextBuilder.TryCreateQuestionState(
+                    document,
+                    context,
+                    result,
+                    document.Text,
+                    out question,
+                    out failure))
+            {
+                break;
+            }
+            if (attempt == radii.Length - 1)
+            {
+                return SuggestionResult.Error("未能定位完整题目", failure);
+            }
+        }
+
+        if (result is null || question is null)
+        {
+            return SuggestionResult.Error("未能取得当前题目的完整答案", failure);
+        }
+
+        var currentDocument = await _documentContextProbeService.CaptureForegroundAsync();
+        if (!WordExerciseContextBuilder.IsSameObservation(document, currentDocument))
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        var fullAnswer = string.IsNullOrWhiteSpace(result.FullAnswer)
+            ? string.IsNullOrWhiteSpace(result.InsertText) ? result.DisplayText : result.InsertText
+            : result.FullAnswer;
+        result = result with
+        {
+            Mode = SuggestionMode.ExerciseAnswer,
+            Origin = "clipboard_word_exercise",
+            FullAnswer = fullAnswer,
+            QuestionType = question.QuestionType,
+            QuestionNumber = question.QuestionNumber,
+            ActiveSubquestionNumber = question.ActiveSubquestionNumber,
+            QuestionText = question.QuestionText
+        };
+        _wordExerciseQuestion = question;
+        _lastWordExerciseSuggestion = result;
+        _wordExerciseBaselineText = document.Text;
+        _wordExercisePendingDocumentIdentity = document.DocumentIdentity;
+        return result;
+    }
+
+    private async Task<SuggestionResult> GetVisionClipboardAnswerAsync(
+        long requestSequence,
+        CancellationToken cancellationToken)
+    {
+        if (!_settingsService.Current.VisionEnabled)
+        {
+            return SuggestionResult.Error("当前不是 Navicat/Word，且屏幕 OCR 已关闭");
+        }
+        if (string.IsNullOrWhiteSpace(_visionApiKey))
+        {
+            return SuggestionResult.Error("请先在设置中保存智谱 API Key");
+        }
+
+        var capture = await _visionScreenshotCaptureService.CaptureAsync(
+            cancellationToken,
+            _settingsService.Current.VisionCaptureScope);
+        EnsureCopyAnswerRequestCurrent(requestSequence, cancellationToken);
+        _logger.WriteVisionCapture(capture, 0);
+        if (!capture.IsCaptured)
+        {
+            return SuggestionResult.Error("无法截图识别当前题目", capture.Message);
+        }
+
+        var result = await _zhipuVisionClient.AnswerExerciseAsync(
+            _settingsService.Current,
+            _visionApiKey,
+            capture,
+            cancellationToken);
+        EnsureCopyAnswerRequestCurrent(requestSequence, cancellationToken);
+        if (!IsForegroundRoot(capture.WindowHandle))
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        if (!result.IsQuestion ||
+            result.Confidence < WordExerciseContextBuilder.MinimumExerciseConfidence)
+        {
+            return SuggestionResult.Error(
+                "屏幕中没有识别到可靠的 SQL/数据库题目",
+                result.Explanation);
+        }
+        return result with { Origin = "clipboard_screen_ocr" };
+    }
+
+    private async Task<bool> TrySetClipboardTextAsync(string text, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                System.Windows.Clipboard.SetDataObject(text, copy: true);
+                return true;
+            }
+            catch (ExternalException) when (attempt < 4)
+            {
+                await Task.Delay(60 * (attempt + 1), cancellationToken);
+            }
+        }
+        return false;
+    }
+
+    private static async Task<string?> TryGetClipboardTextAsync(CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return System.Windows.Clipboard.ContainsText()
+                    ? System.Windows.Clipboard.GetText()
+                    : string.Empty;
+            }
+            catch (ExternalException) when (attempt < 4)
+            {
+                await Task.Delay(60 * (attempt + 1), cancellationToken);
+            }
+        }
+        return null;
+    }
+
+    private bool IsCopyAnswerRequestCurrent(long requestSequence) =>
+        _settingsService.Current.AssistantEnabled &&
+        requestSequence == Volatile.Read(ref _copyAnswerRequestSequence) &&
+        _copyAnswerCancellation is { IsCancellationRequested: false };
+
+    private void EnsureCopyAnswerRequestCurrent(
+        long requestSequence,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!IsCopyAnswerRequestCurrent(requestSequence))
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+    }
+
+    private void CancelCopyAnswerRequest()
+    {
+        Interlocked.Increment(ref _copyAnswerRequestSequence);
+        _copyAnswerCancellation?.Cancel();
+        _copyAnswerCancellation?.Dispose();
+        _copyAnswerCancellation = null;
+    }
+
+    private static bool IsForegroundRoot(long expectedWindowHandle)
+    {
+        if (expectedWindowHandle == 0) return false;
+        var foreground = NativeMethods.GetForegroundWindow();
+        if (foreground == nint.Zero) return false;
+        var root = NativeMethods.GetAncestor(foreground, NativeMethods.GaRoot);
+        if (root == nint.Zero) root = foreground;
+        return root.ToInt64() == expectedWindowHandle;
+    }
+
+    private async Task SmartAnalyzeAsync()
+    {
+        if (!_settingsService.Current.AssistantEnabled)
+        {
+            UpdateSuggestion(SuggestionResult.Info(
+                $"Assistant 已关闭；按 {_settingsService.Current.ToggleAssistantHotkey} 开启"));
+            return;
+        }
+
+        _guidedTypingService.Stop("开始新的智能分析，旧代打会话已停止。");
+        var document = await _documentContextProbeService.CaptureForegroundAsync();
+        if (document.Status == DocumentContextStatus.Captured && IsWordDocument(document))
+        {
+            if (LooksLikeDatabaseExercise(document.Text))
+            {
+                await IdentifyWordExerciseAsync();
+            }
+            else
+            {
+                _authorizedWordDocumentIdentity = document.DocumentIdentity;
+                _lastDocumentContext = document;
+                _lastWordDocumentCompletionContext = null;
+                UpdateSuggestion(SuggestionResult.Loading("已为当前 Word 文档开启 AI 辅助，正在分析光标位置……"));
+                ScheduleWordDocumentCompletion(document, immediate: true);
+            }
+            return;
+        }
+
+        var probe = await Task.Run(() => _probeService.CaptureForegroundNavicat(forceRefresh: true));
+        if (probe.Status == ProbeStatus.Captured && !probe.IsTruncated)
+        {
+            _lastCapturedProbe = probe;
+            if (probe.SelectionLength is > 0)
+            {
+                await AnalyzeSelectionAsync(copyFromNavicat: true);
+            }
+            else
+            {
+                _lastPredictionContext = null;
+                SchedulePrediction(probe, immediate: true);
+            }
+            return;
+        }
+
+        UpdateSuggestion(SuggestionResult.Info(
+            $"当前无法取得可靠全文；按 {_settingsService.Current.VisionScreenshotHotkey} 使用屏幕 OCR 保底"));
+    }
+
+    private void ToggleGuidedTyping()
+    {
+        if (_guidedTypingService.IsActive)
+        {
+            _guidedTypingService.Stop();
+            return;
+        }
+
+        var settings = _settingsService.Current;
+        if (!settings.AssistantEnabled || !settings.GuidedTypingEnabled)
+        {
+            UpdateSuggestion(SuggestionResult.Info("受控逐字代打已在设置中关闭。"));
+            return;
+        }
+        if (string.IsNullOrEmpty(_currentSuggestion.InsertText))
+        {
+            UpdateSuggestion(SuggestionResult.Info("当前没有可代打的 InsertText；请先生成答案。"));
+            return;
+        }
+        if (string.Equals(_currentSuggestion.Origin, "vision_screenshot", StringComparison.Ordinal) &&
+            !_lastVisionHasReliableCaret)
+        {
+            UpdateSuggestion(SuggestionResult.Info(
+                "本次 OCR 没有可靠文本光标，只能查看答案，不能启动受控逐字代打。"));
+            return;
+        }
+
+        var foreground = DocumentContextProbeService.ReadForegroundWindow();
+        GuidedTypingSession? session = null;
+        if (_lastCapturedProbe is { Status: ProbeStatus.Captured, CaretOffset: int navicatCaret } probe &&
+            foreground.ProcessName.Contains("navicat", StringComparison.OrdinalIgnoreCase) &&
+            foreground.RootWindowHandle.ToInt64() == probe.WindowHandle)
+        {
+            session = new GuidedTypingSession(
+                probe.WindowHandle,
+                probe.ProcessName,
+                BuildProbeKey(probe),
+                _currentSuggestion.InsertText,
+                probe.Text,
+                navicatCaret);
+        }
+        else if (_lastDocumentContext is
+                 {
+                     Status: DocumentContextStatus.Captured,
+                     CaretOffset: int wordCaret
+                 } document &&
+                 IsWordDocument(document) &&
+                 foreground.RootWindowHandle.ToInt64() == document.WindowHandle)
+        {
+            session = new GuidedTypingSession(
+                document.WindowHandle,
+                document.ProcessName,
+                $"{document.DocumentIdentity}|{document.ContentHash}|{wordCaret}",
+                _currentSuggestion.InsertText,
+                document.Text,
+                wordCaret);
+        }
+
+        if (session is null)
+        {
+            UpdateSuggestion(SuggestionResult.Info(
+                "代打只支持当前已验证的 Navicat 或 Word 编辑位置；请把光标放回答案位置后重试。"));
+            return;
+        }
+
+        var status = _guidedTypingService.Start(session);
+        if (!status.IsActive)
+        {
+            UpdateSuggestion(SuggestionResult.Error(status.Message));
+        }
+    }
+
+    internal static bool LooksLikeDatabaseExercise(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        var sample = text.Length <= 30_000 ? text : text[..30_000];
+        var subject = sample.Contains("SQL", StringComparison.OrdinalIgnoreCase) ||
+                      sample.Contains("MySQL", StringComparison.OrdinalIgnoreCase) ||
+                      sample.Contains("数据库", StringComparison.OrdinalIgnoreCase);
+        var explicitExercise = sample.Contains("选择题", StringComparison.OrdinalIgnoreCase) ||
+                               sample.Contains("填空题", StringComparison.OrdinalIgnoreCase) ||
+                               sample.Contains("简答题", StringComparison.OrdinalIgnoreCase) ||
+                               sample.Contains("练习题", StringComparison.OrdinalIgnoreCase) ||
+                               sample.Contains("试题", StringComparison.OrdinalIgnoreCase);
+        var answerCue = sample.Contains("答：", StringComparison.Ordinal) ||
+                        sample.Contains("答案", StringComparison.Ordinal) ||
+                        sample.Contains('？') ||
+                        sample.Contains('?');
+        var numberedQuestions = System.Text.RegularExpressions.Regex.Matches(
+            sample,
+            @"(?m)^\s*(?:(?:选择|填空|简答)\s*)?(?:第\s*)?\d+[\.、：:]\s*").Count >= 2;
+        var titledQuestion = sample.Contains("题目", StringComparison.OrdinalIgnoreCase) && answerCue;
+        return subject && (explicitExercise || titledQuestion || numberedQuestions && answerCue);
+    }
+
     private void InitializeFallbackSession()
     {
         if (_fallbackSessionInitialized) return;
@@ -1801,13 +2885,25 @@ public partial class MainWindow : Window
     {
         Dispatcher.BeginInvoke(() =>
         {
+            CancelCopyAnswerRequest();
             var settings = _settingsService.Current;
             if (patch.TaskbarPanelEnabled is bool taskbar) settings.TaskbarPanelEnabled = taskbar;
             if (patch.VisionEnabled is bool visionEnabled) settings.VisionEnabled = visionEnabled;
             if (!string.IsNullOrWhiteSpace(patch.VisionApiBaseUrl)) settings.VisionApiBaseUrl = patch.VisionApiBaseUrl;
             if (!string.IsNullOrWhiteSpace(patch.VisionModel)) settings.VisionModel = patch.VisionModel;
+            if (patch.FallbackEnabled is bool fallbackEnabled) settings.FallbackEnabled = fallbackEnabled;
+            if (!string.IsNullOrWhiteSpace(patch.FallbackApiBaseUrl)) settings.FallbackApiBaseUrl = patch.FallbackApiBaseUrl;
+            if (!string.IsNullOrWhiteSpace(patch.FallbackModel)) settings.FallbackModel = patch.FallbackModel;
             if (patch.TaskbarWidth is double width) settings.TaskbarWidth = width;
-            if (!string.IsNullOrWhiteSpace(patch.WordExerciseHotkey)) settings.WordExerciseHotkey = patch.WordExerciseHotkey;
+            if (!string.IsNullOrWhiteSpace(patch.SmartActionHotkey))
+            {
+                settings.SmartActionHotkey = patch.SmartActionHotkey;
+                settings.WordExerciseHotkey = patch.SmartActionHotkey;
+            }
+            if (!string.IsNullOrWhiteSpace(patch.CopyFullAnswerHotkey)) settings.CopyFullAnswerHotkey = patch.CopyFullAnswerHotkey;
+            if (!string.IsNullOrWhiteSpace(patch.AnswerClipboardQuestionHotkey)) settings.AnswerClipboardQuestionHotkey = patch.AnswerClipboardQuestionHotkey;
+            if (!string.IsNullOrWhiteSpace(patch.GuidedTypingHotkey)) settings.GuidedTypingHotkey = patch.GuidedTypingHotkey;
+            if (!string.IsNullOrWhiteSpace(patch.ToggleMobileHotkey)) settings.ToggleMobileHotkey = patch.ToggleMobileHotkey;
             if (!string.IsNullOrWhiteSpace(patch.VisionScreenshotHotkey)) settings.VisionScreenshotHotkey = patch.VisionScreenshotHotkey;
             if (patch.TaskbarFontSize is double tf) settings.TaskbarStyle.FontSize = tf;
             if (patch.TaskbarLineHeight is double tl) settings.TaskbarStyle.LineHeight = tl;
@@ -1840,6 +2936,7 @@ public partial class MainWindow : Window
         await ApplySettingsAsync();
         if (enabled)
         {
+            await WarmDatabaseCatalogAsync();
             await CaptureNowAsync(forceRefresh: true);
         }
     }
@@ -1882,7 +2979,61 @@ public partial class MainWindow : Window
                     ? $"手机页面：启动失败 — {_mobileServer.LastError}"
                     : "手机页面：关闭";
         }
+        HotkeyStatusText.ToolTip = $"数据库：{_databaseStatus}；{_guidedTypingStatus}";
     }
+
+    private void RefreshRuntimeIndicators()
+    {
+        var settings = _settingsService.Current;
+        var mainLevel = !settings.AssistantEnabled
+            ? "off"
+            : _currentSuggestion.IsLoading
+                ? "working"
+                : _currentSuggestion.Mode == SuggestionMode.Error
+                    ? "error"
+                    : !string.IsNullOrWhiteSpace(_currentSuggestion.DisplayText)
+                        ? "ready"
+                        : "standby";
+        var databaseLevel = !settings.DatabaseConnection.Enabled
+            ? "off"
+            : _databaseStatus.StartsWith("正在", StringComparison.Ordinal)
+                ? "working"
+                : _currentSuggestion.Origin.Contains("database_grounded", StringComparison.Ordinal)
+                    ? "ready"
+                    : _databaseStatus.Contains("失败", StringComparison.Ordinal) ||
+                      _databaseStatus.Contains("未保存", StringComparison.Ordinal)
+                        ? "error"
+                        : "standby";
+        var runtime = new AssistantRuntimeStatus
+        {
+            MainLevel = mainLevel,
+            MainText = !settings.AssistantEnabled
+                ? "Assistant 已关闭"
+                : _currentSuggestion.IsLoading ? "正在处理" : _currentSuggestion.DisplayText,
+            DatabaseLevel = databaseLevel,
+            DatabaseText = _databaseStatus,
+            GuidedTypingLevel = _guidedTypingLevel,
+            GuidedTypingText = _guidedTypingStatus
+        };
+
+        StatusDot.Fill = RuntimeBrush(mainLevel);
+        StatusDot.ToolTip = $"主流程：{runtime.MainText}";
+        DatabaseStatusDot.Fill = RuntimeBrush(databaseLevel);
+        DatabaseStatusDot.ToolTip = $"数据库增强：{runtime.DatabaseText}";
+        GuidedTypingStatusDot.Fill = RuntimeBrush(_guidedTypingLevel);
+        GuidedTypingStatusDot.ToolTip = $"受控代打：{runtime.GuidedTypingText}";
+        _taskbarWindow.UpdateRuntimeStatus(runtime);
+        _mobileServer.UpdateRuntimeStatus(runtime);
+    }
+
+    private static SolidColorBrush RuntimeBrush(string level) => level switch
+    {
+        "off" => Brush(127, 140, 141),
+        "working" => Brush(243, 156, 18),
+        "ready" => Brush(39, 174, 96),
+        "error" => Brush(192, 57, 43),
+        _ => Brush(52, 152, 219)
+    };
 
     private void OpenSettings()
     {
@@ -1890,7 +3041,8 @@ public partial class MainWindow : Window
         var dialog = new SettingsWindow(
             _settingsService.Current,
             !string.IsNullOrWhiteSpace(_apiKey),
-            !string.IsNullOrWhiteSpace(_visionApiKey)) { Owner = this };
+            !string.IsNullOrWhiteSpace(_visionApiKey),
+            !string.IsNullOrEmpty(_databasePassword)) { Owner = this };
         if (dialog.ShowDialog() != true || dialog.UpdatedSettings is null) return;
         try
         {
@@ -1901,9 +3053,26 @@ public partial class MainWindow : Window
             {
                 WindowsCredentialService.SaveZhipuApiKey(dialog.NewVisionApiKey);
             }
+            var databaseProfileId = dialog.UpdatedSettings.DatabaseConnection.ProfileId;
+            if (dialog.ClearDatabasePassword)
+            {
+                WindowsCredentialService.DeleteDatabasePassword(databaseProfileId);
+            }
+            if (!string.IsNullOrEmpty(dialog.NewDatabasePassword))
+            {
+                WindowsCredentialService.SaveDatabasePassword(
+                    databaseProfileId,
+                    dialog.UpdatedSettings.DatabaseConnection.Username,
+                    dialog.NewDatabasePassword);
+            }
             _apiKey = SafeReadApiKey();
             _visionApiKey = SafeReadVisionApiKey();
+            _databasePassword = SafeReadDatabasePassword(databaseProfileId);
+            CancelCopyAnswerRequest();
+            _predictionCancellation?.Cancel();
             _lastPredictionContext = null;
+            _databaseService.ClearCatalogCache();
+            _databaseCatalog = null;
             _settingsService.Save(dialog.UpdatedSettings);
             ApplySettingsAfterSaveAsync().Forget();
         }
@@ -1918,6 +3087,7 @@ public partial class MainWindow : Window
         await ApplySettingsAsync();
         if (_settingsService.Current.AssistantEnabled)
         {
+            await WarmDatabaseCatalogAsync(forceRefresh: true);
             await CaptureNowAsync(forceRefresh: true);
         }
     }
@@ -2056,10 +3226,14 @@ public partial class MainWindow : Window
     {
         FlushPendingCaptureLog(force: true);
         CancelVisionRequest();
+        CancelCopyAnswerRequest();
         _predictionCancellation?.Cancel();
         _predictionCancellation?.Dispose();
+        _databaseCatalogCancellation?.Cancel();
+        _databaseCatalogCancellation?.Dispose();
         _hotkeyService.Dispose();
         _keyboardFallbackService.Dispose();
+        _guidedTypingService.Dispose();
         _documentContextProbeService.Dispose();
         _deepSeekClient.Dispose();
         _zhipuVisionClient.Dispose();
@@ -2086,6 +3260,12 @@ public partial class MainWindow : Window
     {
         try { return System.Windows.Clipboard.ContainsText() ? System.Windows.Clipboard.GetText() : string.Empty; }
         catch { return string.Empty; }
+    }
+
+    private static string? SafeReadDatabasePassword(string profileId)
+    {
+        try { return WindowsCredentialService.ReadDatabasePassword(profileId); }
+        catch { return null; }
     }
 }
 

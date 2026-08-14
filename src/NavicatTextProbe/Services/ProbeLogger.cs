@@ -148,9 +148,15 @@ internal sealed class ProbeLogger : IDisposable
         settings.TaskbarWidth,
         settings.MobileServerEnabled,
         settings.KeyboardFallbackEnabled,
+        settings.GuidedTypingEnabled,
+        databaseEnabled = settings.DatabaseConnection.Enabled,
+        databaseProfileIdHash = ContentHasher.Sha256(settings.DatabaseConnection.ProfileId),
+        settings.SmartActionHotkey,
+        settings.GuidedTypingHotkey,
+        settings.ToggleMobileHotkey,
         settings.WordExerciseHotkey,
         settings.VisionScreenshotHotkey,
-        note = "API Key、手机访问令牌、自定义全局提示词和截图内容不会写入探测日志。"
+        note = "API Key、数据库连接地址/用户名/密码、手机访问令牌、自定义全局提示词和截图内容不会写入探测日志。"
     });
 
     public void WriteVisionCapture(VisionCaptureSnapshot capture, long elapsedMilliseconds) => Write(
@@ -257,6 +263,29 @@ internal sealed class ProbeLogger : IDisposable
         component,
         message
     });
+
+    public void WriteDatabaseContext(bool success, int rowCount, bool truncated, string message) => Write(
+        "database_context",
+        new
+        {
+            success,
+            rowCount,
+            truncated,
+            outcome = success ? "success" : "failed",
+            messageCharacters = message?.Length ?? 0,
+            note = "不记录数据库密码、连接字符串、地址、用户名、异常正文、查询文本、Schema 或返回行。"
+        });
+
+    public void WriteClipboardAnswer(string source, string kind, int characterCount, bool success) => Write(
+        "clipboard_answer",
+        new
+        {
+            source,
+            kind,
+            characterCount,
+            success,
+            note = "只记录来源、答案类型、字符数和成功状态，不记录题目、SQL 或剪贴板正文。"
+        });
 
     private void Write(string eventType, object data, bool flush = false)
     {

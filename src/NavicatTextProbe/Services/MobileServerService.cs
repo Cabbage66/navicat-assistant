@@ -24,6 +24,7 @@ internal sealed class MobileServerService : IAsyncDisposable
     private Task? _serverLoop;
     private SuggestionResult _suggestion = SuggestionResult.Info("等待 Navicat SQL、Word 练习题或主动截图…");
     private AppSettings _settings = new();
+    private AssistantRuntimeStatus _runtimeStatus = new();
 
     public bool IsRunning => _listener is not null;
 
@@ -75,6 +76,14 @@ internal sealed class MobileServerService : IAsyncDisposable
         {
             _suggestion = suggestion;
             _settings = settings;
+        }
+    }
+
+    public void UpdateRuntimeStatus(AssistantRuntimeStatus status)
+    {
+        lock (_stateLock)
+        {
+            _runtimeStatus = status;
         }
     }
 
@@ -256,6 +265,7 @@ internal sealed class MobileServerService : IAsyncDisposable
                         json = JsonSerializer.Serialize(new
                         {
                             suggestion = _suggestion,
+                            runtime = _runtimeStatus,
                             settings = new
                             {
                                 _settings.TaskbarPanelEnabled,
@@ -264,7 +274,14 @@ internal sealed class MobileServerService : IAsyncDisposable
                                 _settings.VisionEnabled,
                                 _settings.VisionApiBaseUrl,
                                 _settings.VisionModel,
-                                _settings.WordExerciseHotkey,
+                                _settings.FallbackEnabled,
+                                _settings.FallbackApiBaseUrl,
+                                _settings.FallbackModel,
+                                _settings.SmartActionHotkey,
+                                _settings.CopyFullAnswerHotkey,
+                                _settings.AnswerClipboardQuestionHotkey,
+                                _settings.GuidedTypingHotkey,
+                                _settings.ToggleMobileHotkey,
                                 _settings.VisionScreenshotHotkey,
                                 taskbarStyle = _settings.TaskbarStyle,
                                 mobileStyle = _settings.MobileStyle
@@ -284,6 +301,11 @@ internal sealed class MobileServerService : IAsyncDisposable
                         await WriteResponseAsync(stream, 400, "text/plain; charset=utf-8", "设置内容为空", cancellationToken);
                         return;
                     }
+                    if (!TryValidateSettingsPatch(patch, out var validationError))
+                    {
+                        await WriteResponseAsync(stream, 400, "text/plain; charset=utf-8", validationError, cancellationToken);
+                        return;
+                    }
 
                     SettingsChanged?.Invoke(this, patch);
                     await WriteResponseAsync(stream, 200, "application/json; charset=utf-8", "{\"saved\":true}", cancellationToken);
@@ -297,6 +319,40 @@ internal sealed class MobileServerService : IAsyncDisposable
                 LastError = ex.ToString();
             }
         }
+    }
+
+    private bool TryValidateSettingsPatch(MobileSettingsPatch patch, out string error)
+    {
+        string[] hotkeys;
+        lock (_stateLock)
+        {
+            hotkeys =
+            [
+                _settings.ToggleAssistantHotkey,
+                string.IsNullOrWhiteSpace(patch.SmartActionHotkey)
+                    ? _settings.SmartActionHotkey
+                    : patch.SmartActionHotkey,
+                string.IsNullOrWhiteSpace(patch.CopyFullAnswerHotkey)
+                    ? _settings.CopyFullAnswerHotkey
+                    : patch.CopyFullAnswerHotkey,
+                string.IsNullOrWhiteSpace(patch.AnswerClipboardQuestionHotkey)
+                    ? _settings.AnswerClipboardQuestionHotkey
+                    : patch.AnswerClipboardQuestionHotkey,
+                string.IsNullOrWhiteSpace(patch.VisionScreenshotHotkey)
+                    ? _settings.VisionScreenshotHotkey
+                    : patch.VisionScreenshotHotkey,
+                string.IsNullOrWhiteSpace(patch.GuidedTypingHotkey)
+                    ? _settings.GuidedTypingHotkey
+                    : patch.GuidedTypingHotkey,
+                string.IsNullOrWhiteSpace(patch.ToggleMobileHotkey)
+                    ? _settings.ToggleMobileHotkey
+                    : patch.ToggleMobileHotkey,
+                _settings.CycleCandidatesHotkey,
+                "Win+PageUp",
+                "Win+PageDown"
+            ];
+        }
+        return GlobalHotkeyService.TryValidateShortcutSet(hotkeys, out error);
     }
 
     private bool IsAuthorized(string? requestToken)
@@ -394,26 +450,33 @@ internal sealed class MobileServerService : IAsyncDisposable
           <style>
             :root{color-scheme:dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#0c1117;color:#f2f5f7}
             body{margin:0;padding:18px;max-width:920px;margin:auto}.card{background:#151d27;border:1px solid #293746;border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 8px 28px #0005}
-            .badge{display:inline-block;padding:3px 9px;border-radius:99px;background:#1e6f50;color:#c9ffe8;font-size:12px}h1{font-size:21px;margin:4px 0 16px}h2{font-size:15px;color:#9fb1c3;margin:0 0 9px}
+            .badge{display:inline-block;padding:3px 9px;border-radius:99px;background:#1e6f50;color:#c9ffe8;font-size:12px}.lights{display:inline-flex;gap:4px;margin-left:8px}.light{width:7px;height:7px;border-radius:50%;background:#7f8c8d}.light.off{background:#7f8c8d}.light.standby{background:#3498db}.light.working{background:#f39c12}.light.ready{background:#27ae60}.light.error{background:#c0392b}h1{font-size:21px;margin:4px 0 16px}h2{font-size:15px;color:#9fb1c3;margin:0 0 9px}
             #display{font:600 18px/1.55 ui-monospace,Consolas,monospace;color:#7df2b1;white-space:pre-wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0d131a;padding:12px;border-radius:9px;color:#dce7ef}
             #explanation,#issues{line-height:1.65;color:#c7d2dc}#candidates{padding-left:22px;line-height:1.5}#candidates li{padding:7px 9px;margin:6px 0;border-left:3px solid #405365;background:#0d131a;border-radius:5px;font-family:ui-monospace,Consolas,monospace}#candidates li.active{border-color:#58d68d;color:#9af5c2}.grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}.field{display:flex;flex-direction:column;gap:5px}label{font-size:13px;color:#aab8c5}input{background:#0d131a;color:#fff;border:1px solid #3a4d60;border-radius:7px;padding:9px}button{background:#2b8a62;color:white;border:0;border-radius:8px;padding:11px 15px;font-weight:650}.muted{color:#7f91a3;font-size:12px}
             @media(max-width:600px){.grid{grid-template-columns:1fr}body{padding:11px}.card{padding:13px}}
           </style>
         </head>
         <body>
-          <h1>Assistant <span id="mode" class="badge">等待</span></h1>
+          <h1>Assistant <span id="mode" class="badge">等待</span><span class="lights"><span id="mainLight" class="light standby"></span><span id="databaseLight" class="light off"></span><span id="typingLight" class="light off"></span></span></h1>
           <section class="card"><h2>当前最有用的建议</h2><div id="display">等待 Assistant…</div></section>
           <section id="exerciseCard" class="card" hidden><h2 id="questionTitle">完整题目</h2><pre id="question">—</pre><h2>完整参考答案</h2><pre id="fullAnswer">—</pre></section>
           <section class="card"><h2 id="insertTitle">完整建议</h2><pre id="insert">—</pre><div id="candidateBlock" hidden><h2>本次 3 个候选（电脑按 Ctrl+Alt+R 切换）</h2><ol id="candidates"></ol></div><h2>答案解析 / 原因</h2><div id="explanation">—</div><ul id="issues"></ul></section>
-          <details class="card"><summary>展示配置</summary><p class="muted">保存后会同步到电脑任务栏和当前手机页面。</p>
+          <details class="card"><summary>展示配置</summary><p class="muted">保存后会同步到电脑任务栏和当前手机页面。Assistant 默认独占业务快捷键，命中后不再传给钉钉等普通应用；Windows 系统保留键和权限更高的程序除外。</p>
             <div class="grid">
               <label><input id="taskbarPanelEnabled" type="checkbox"> 开启任务栏内建议</label>
               <label><input id="visionEnabled" type="checkbox"> 开启主动截图识题</label>
+              <label><input id="fallbackEnabled" type="checkbox"> DeepSeek 超时自动切换智谱 GLM</label>
               <div class="field"><label>任务栏期望宽度</label><input id="taskbarWidth" type="number" min="200" max="1400" step="20"></div>
-              <div class="field"><label>识别/切换 Word 当前题目快捷键</label><input id="wordExerciseHotkey" type="text" placeholder="Ctrl+Alt+A"></div>
-              <div class="field"><label>截图识题快捷键</label><input id="visionScreenshotHotkey" type="text" placeholder="Ctrl+Shift+C"></div>
+              <div class="field"><label>智能分析当前内容快捷键</label><input id="smartActionHotkey" type="text" placeholder="Ctrl+Alt+A"></div>
+              <div class="field"><label>完整答案复制快捷键</label><input id="copyFullAnswerHotkey" type="text" placeholder="Ctrl+Alt+C"></div>
+              <div class="field"><label>剪贴板题目回答快捷键</label><input id="answerClipboardQuestionHotkey" type="text" placeholder="Ctrl+Alt+V"></div>
+              <div class="field"><label>屏幕 OCR 快捷键</label><input id="visionScreenshotHotkey" type="text" placeholder="Ctrl+Alt+O"></div>
+              <div class="field"><label>受控逐字代打快捷键</label><input id="guidedTypingHotkey" type="text" placeholder="Ctrl+Alt+D"></div>
+              <div class="field"><label>手机答案开关快捷键</label><input id="toggleMobileHotkey" type="text" placeholder="Ctrl+Alt+M"></div>
               <div class="field"><label>视觉 API 地址</label><input id="visionApiBaseUrl" type="text"></div>
               <div class="field"><label>视觉模型</label><input id="visionModel" type="text"></div>
+              <div class="field"><label>GLM 冗余 API 地址</label><input id="fallbackApiBaseUrl" type="text"></div>
+              <div class="field"><label>GLM 冗余模型</label><input id="fallbackModel" type="text"></div>
               <div class="field"><label>任务栏字号</label><input id="taskbarFont" type="number" min="10" max="36" step="1"></div>
               <div class="field"><label>任务栏行高</label><input id="taskbarLine" type="number" min="12" max="54" step="1"></div>
               <div class="field"><label>任务栏背景色</label><input id="taskbarBg" type="color"></div>
@@ -429,9 +492,10 @@ internal sealed class MobileServerService : IAsyncDisposable
           <script>
             const token=new URLSearchParams(location.search).get('token')||'';let populated=false;
             const $=id=>document.getElementById(id); const api=p=>p+'?token='+encodeURIComponent(token);
-            async function refresh(){try{const r=await fetch(api('/api/state'));if(!r.ok)throw Error(r.status);const x=await r.json(),s=x.suggestion||{},c=x.settings||{};
-              const cs=s.candidates||[],active=s.activeCandidateIndex||0,modes=['补全','诊断','状态','错误','题目回答','题目续写'],types={choice:'选择题',fill_blank:'填空题',short_answer:'简答题',unknown:'题目'},exercise=s.mode===4||s.mode===5;
+            async function refresh(){try{const r=await fetch(api('/api/state'));if(!r.ok)throw Error(r.status);const x=await r.json(),s=x.suggestion||{},c=x.settings||{},rt=x.runtime||{};
+              const cs=s.candidates||[],active=s.activeCandidateIndex||0,modes=['补全','诊断','状态','错误','题目回答','题目续写'],types={sql:'SQL题',choice:'选择题',fill_blank:'填空题',short_answer:'简答题',unknown:'题目'},exercise=s.mode===4||s.mode===5;
               let mode=cs.length?`候选 ${active+1}/${cs.length}`:(modes[s.mode]||'建议');if(s.questionType)mode+=` · ${types[s.questionType]||s.questionType}`;if(exercise&&s.questionNumber)mode+=s.questionNumber==='当前题'?' · 当前题':` · 第 ${s.questionNumber} 题`;if(exercise&&s.activeSubquestionNumber)mode+=` · 子问 ${s.activeSubquestionNumber}`;$('mode').textContent=mode;$('display').textContent=s.displayText||'当前没有足够可靠的建议';$('insert').textContent=s.insertText||'—';$('insertTitle').textContent=s.mode===4?'本次答案文本':s.mode===5?'当前光标续写':'完整建议代码';$('explanation').textContent=s.explanation||'—';
+              const light=(id,level,title)=>{const e=$(id);e.className='light '+(level||'off');e.title=title||''};light('mainLight',rt.mainLevel,rt.mainText);light('databaseLight',rt.databaseLevel,rt.databaseText);light('typingLight',rt.guidedTypingLevel,rt.guidedTypingText);
               $('exerciseCard').hidden=!exercise;$('questionTitle').textContent=exercise?(s.questionNumber&&s.questionNumber!=='当前题'?`第 ${s.questionNumber} 题 · 完整题目`:'当前完整题目'):'完整题目';$('question').textContent=s.questionText||'—';$('fullAnswer').textContent=s.fullAnswer||'—';
               $('candidateBlock').hidden=!cs.length;$('candidates').replaceChildren(...cs.map((c,i)=>{const li=document.createElement('li');li.textContent=`${i+1}. ${c.displayText||c.insertText||'—'}`;if(i===active)li.className='active';return li}));
               $('issues').replaceChildren(...(s.issues||[]).map(i=>{const li=document.createElement('li');li.textContent=i;return li}));
@@ -439,14 +503,19 @@ internal sealed class MobileServerService : IAsyncDisposable
               const rgba=(hex,a)=>{const v=(hex||'#151d27').replace('#','');const n=parseInt(v.length===3?v.split('').map(x=>x+x).join(''):v,16);return `rgba(${n>>16},${n>>8&255},${n&255},${a??.96})`};document.querySelectorAll('.card').forEach(x=>x.style.backgroundColor=rgba(m.backgroundColor,m.backgroundOpacity));
               if(!populated){populated=true;$('taskbarPanelEnabled').checked=!!c.taskbarPanelEnabled;const t=c.taskbarStyle||{};
                 $('visionEnabled').checked=!!c.visionEnabled;
+                $('fallbackEnabled').checked=!!c.fallbackEnabled;
                 $('taskbarWidth').value=c.taskbarWidth||640;
-                $('wordExerciseHotkey').value=c.wordExerciseHotkey||'Ctrl+Alt+A';
-                $('visionScreenshotHotkey').value=c.visionScreenshotHotkey||'Ctrl+Shift+C';
-                $('visionApiBaseUrl').value=c.visionApiBaseUrl||'https://open.bigmodel.cn/api/paas/v4';$('visionModel').value=c.visionModel||'glm-4.6v';
+                $('smartActionHotkey').value=c.smartActionHotkey||'Ctrl+Alt+A';
+                $('copyFullAnswerHotkey').value=c.copyFullAnswerHotkey||'Ctrl+Alt+C';
+                $('answerClipboardQuestionHotkey').value=c.answerClipboardQuestionHotkey||'Ctrl+Alt+V';
+                $('visionScreenshotHotkey').value=c.visionScreenshotHotkey||'Ctrl+Alt+O';
+                $('guidedTypingHotkey').value=c.guidedTypingHotkey||'Ctrl+Alt+D';
+                $('toggleMobileHotkey').value=c.toggleMobileHotkey||'Ctrl+Alt+M';
+                $('visionApiBaseUrl').value=c.visionApiBaseUrl||'https://open.bigmodel.cn/api/paas/v4';$('visionModel').value=c.visionModel||'glm-4.6v';$('fallbackApiBaseUrl').value=c.fallbackApiBaseUrl||'https://open.bigmodel.cn/api/paas/v4';$('fallbackModel').value=c.fallbackModel||'glm-5.2';
                 $('taskbarFont').value=t.fontSize||14;$('taskbarLine').value=t.lineHeight||21;$('taskbarBg').value=t.backgroundColor||'#17202a';$('taskbarFg').value=t.fontColor||'#f8f9f9';$('taskbarOpacity').value=t.backgroundOpacity||.92;
                 $('mobileFont').value=m.fontSize||18;$('mobileLine').value=m.lineHeight||28;$('mobileBg').value=m.backgroundColor||'#151d27';$('mobileFg').value=m.fontColor||'#7df2b1';$('mobileOpacity').value=m.backgroundOpacity||.96;}}
               catch(e){$('display').textContent='无法连接电脑端：'+e.message}}
-            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,visionEnabled:$('visionEnabled').checked,visionApiBaseUrl:$('visionApiBaseUrl').value.trim(),visionModel:$('visionModel').value.trim(),taskbarWidth:+$('taskbarWidth').value,wordExerciseHotkey:$('wordExerciseHotkey').value.trim(),visionScreenshotHotkey:$('visionScreenshotHotkey').value.trim(),taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
+            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,visionEnabled:$('visionEnabled').checked,visionApiBaseUrl:$('visionApiBaseUrl').value.trim(),visionModel:$('visionModel').value.trim(),fallbackEnabled:$('fallbackEnabled').checked,fallbackApiBaseUrl:$('fallbackApiBaseUrl').value.trim(),fallbackModel:$('fallbackModel').value.trim(),taskbarWidth:+$('taskbarWidth').value,smartActionHotkey:$('smartActionHotkey').value.trim(),copyFullAnswerHotkey:$('copyFullAnswerHotkey').value.trim(),answerClipboardQuestionHotkey:$('answerClipboardQuestionHotkey').value.trim(),visionScreenshotHotkey:$('visionScreenshotHotkey').value.trim(),guidedTypingHotkey:$('guidedTypingHotkey').value.trim(),toggleMobileHotkey:$('toggleMobileHotkey').value.trim(),taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
               const r=await fetch(api('/api/settings'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('saved').textContent=r.ok?'已保存':'保存失败';setTimeout(()=>$('saved').textContent='',1800)};
             refresh();setInterval(refresh,1200);
           </script>
@@ -460,8 +529,15 @@ internal sealed record MobileSettingsPatch
     public bool? VisionEnabled { get; init; }
     public string? VisionApiBaseUrl { get; init; }
     public string? VisionModel { get; init; }
+    public bool? FallbackEnabled { get; init; }
+    public string? FallbackApiBaseUrl { get; init; }
+    public string? FallbackModel { get; init; }
     public double? TaskbarWidth { get; init; }
-    public string? WordExerciseHotkey { get; init; }
+    public string? SmartActionHotkey { get; init; }
+    public string? CopyFullAnswerHotkey { get; init; }
+    public string? AnswerClipboardQuestionHotkey { get; init; }
+    public string? GuidedTypingHotkey { get; init; }
+    public string? ToggleMobileHotkey { get; init; }
     public string? VisionScreenshotHotkey { get; init; }
     public double? TaskbarFontSize { get; init; }
     public double? TaskbarLineHeight { get; init; }

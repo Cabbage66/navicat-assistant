@@ -3,14 +3,20 @@ using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using NavicatTextProbe.Models;
+using NavicatTextProbe.Services;
 
 namespace NavicatTextProbe;
 
 public partial class SettingsWindow : Window
 {
     private readonly AppSettings _workingCopy;
+    private readonly MySqlDatabaseService _databaseService = new();
 
-    public SettingsWindow(AppSettings settings, bool hasSavedApiKey, bool hasSavedVisionApiKey)
+    public SettingsWindow(
+        AppSettings settings,
+        bool hasSavedApiKey,
+        bool hasSavedVisionApiKey,
+        bool hasSavedDatabasePassword)
     {
         InitializeComponent();
         Icon = Imaging.CreateBitmapSourceFromHIcon(
@@ -24,6 +30,9 @@ public partial class SettingsWindow : Window
         VisionApiKeyStatusText.Text = hasSavedVisionApiKey
             ? "Windows 凭据管理器中已经保存了智谱 API Key。"
             : "尚未保存智谱 API Key。明文暴露过的 Key 必须先在智谱控制台吊销并重建。";
+        DatabasePasswordStatusText.Text = hasSavedDatabasePassword
+            ? "Windows 凭据管理器中已保存此连接的密码；新密码留空会保留现有密码。"
+            : "尚未保存数据库密码。密码不会写入 settings.json。";
         PopulateControls();
     }
 
@@ -37,6 +46,10 @@ public partial class SettingsWindow : Window
 
     public bool ClearVisionApiKey => ClearVisionApiKeyCheckBox.IsChecked == true;
 
+    public string NewDatabasePassword => DatabasePasswordBox.Password;
+
+    public bool ClearDatabasePassword => ClearDatabasePasswordCheckBox.IsChecked == true;
+
     private void PopulateControls()
     {
         AiEnabledCheckBox.IsChecked = _workingCopy.AiEnabled;
@@ -45,6 +58,10 @@ public partial class SettingsWindow : Window
         VisionEnabledCheckBox.IsChecked = _workingCopy.VisionEnabled;
         VisionApiBaseUrlTextBox.Text = _workingCopy.VisionApiBaseUrl;
         VisionModelTextBox.Text = _workingCopy.VisionModel;
+        VisionCaptureScopeComboBox.SelectedValue = _workingCopy.VisionCaptureScope;
+        FallbackEnabledCheckBox.IsChecked = _workingCopy.FallbackEnabled;
+        FallbackApiBaseUrlTextBox.Text = _workingCopy.FallbackApiBaseUrl;
+        FallbackModelTextBox.Text = _workingCopy.FallbackModel;
         GlobalPromptTextBox.Text = _workingCopy.CustomGlobalPrompt;
         DebounceTextBox.Text = _workingCopy.PredictionDebounceMilliseconds.ToString();
         MinimumIntervalTextBox.Text = _workingCopy.PredictionMinimumIntervalMilliseconds.ToString();
@@ -67,11 +84,28 @@ public partial class SettingsWindow : Window
         MobileBackgroundTextBox.Text = _workingCopy.MobileStyle.BackgroundColor;
         MobileForegroundTextBox.Text = _workingCopy.MobileStyle.FontColor;
         KeyboardFallbackCheckBox.IsChecked = _workingCopy.KeyboardFallbackEnabled;
+        GuidedTypingEnabledCheckBox.IsChecked = _workingCopy.GuidedTypingEnabled;
         AssistantHotkeyTextBox.Text = _workingCopy.ToggleAssistantHotkey;
-        AnalyzeHotkeyTextBox.Text = _workingCopy.AnalyzeSelectionHotkey;
+        SmartActionHotkeyTextBox.Text = _workingCopy.SmartActionHotkey;
+        CopyFullAnswerHotkeyTextBox.Text = _workingCopy.CopyFullAnswerHotkey;
+        AnswerClipboardQuestionHotkeyTextBox.Text = _workingCopy.AnswerClipboardQuestionHotkey;
+        GuidedTypingHotkeyTextBox.Text = _workingCopy.GuidedTypingHotkey;
+        ToggleMobileHotkeyTextBox.Text = _workingCopy.ToggleMobileHotkey;
         CandidateHotkeyTextBox.Text = _workingCopy.CycleCandidatesHotkey;
-        WordExerciseHotkeyTextBox.Text = _workingCopy.WordExerciseHotkey;
         VisionScreenshotHotkeyTextBox.Text = _workingCopy.VisionScreenshotHotkey;
+
+        var database = _workingCopy.DatabaseConnection;
+        DatabaseEnabledCheckBox.IsChecked = database.Enabled;
+        DatabaseDisplayNameTextBox.Text = database.DisplayName;
+        DatabaseHostTextBox.Text = database.Host;
+        DatabasePortTextBox.Text = database.Port.ToString();
+        DatabaseUsernameTextBox.Text = database.Username;
+        DatabaseNameTextBox.Text = database.Database;
+        DatabaseSslModeComboBox.SelectedValue = database.SslMode;
+        DatabaseConnectTimeoutTextBox.Text = database.ConnectionTimeoutSeconds.ToString();
+        DatabaseQueryTimeoutTextBox.Text = database.QueryTimeoutSeconds.ToString();
+        DatabaseMaximumRowsTextBox.Text = database.MaximumRows.ToString();
+        DatabaseMaximumKilobytesTextBox.Text = (database.MaximumResultBytes / 1024).ToString();
     }
 
     private void SaveButton_OnClick(object sender, RoutedEventArgs e)
@@ -90,6 +124,10 @@ public partial class SettingsWindow : Window
             System.Windows.MessageBox.Show(this, "宽度、字号、行高、透明度、端口和等待时间必须填写有效数字。", "设置无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
+        if (!TryApplyDatabaseControls(showMessage: true))
+        {
+            return;
+        }
 
         _workingCopy.AiEnabled = AiEnabledCheckBox.IsChecked == true;
         _workingCopy.ApiBaseUrl = ApiBaseUrlTextBox.Text.Trim();
@@ -97,6 +135,10 @@ public partial class SettingsWindow : Window
         _workingCopy.VisionEnabled = VisionEnabledCheckBox.IsChecked == true;
         _workingCopy.VisionApiBaseUrl = VisionApiBaseUrlTextBox.Text.Trim();
         _workingCopy.VisionModel = VisionModelTextBox.Text.Trim();
+        _workingCopy.VisionCaptureScope = VisionCaptureScopeComboBox.SelectedValue?.ToString() ?? "CurrentMonitor";
+        _workingCopy.FallbackEnabled = FallbackEnabledCheckBox.IsChecked == true;
+        _workingCopy.FallbackApiBaseUrl = FallbackApiBaseUrlTextBox.Text.Trim();
+        _workingCopy.FallbackModel = FallbackModelTextBox.Text.Trim();
         _workingCopy.CustomGlobalPrompt = GlobalPromptTextBox.Text;
         _workingCopy.PredictionDebounceMilliseconds = debounce;
         _workingCopy.PredictionMinimumIntervalMilliseconds = minimumInterval;
@@ -117,13 +159,140 @@ public partial class SettingsWindow : Window
         _workingCopy.MobileStyle.BackgroundColor = MobileBackgroundTextBox.Text.Trim();
         _workingCopy.MobileStyle.FontColor = MobileForegroundTextBox.Text.Trim();
         _workingCopy.KeyboardFallbackEnabled = KeyboardFallbackCheckBox.IsChecked == true;
+        _workingCopy.GuidedTypingEnabled = GuidedTypingEnabledCheckBox.IsChecked == true;
         _workingCopy.ToggleAssistantHotkey = AssistantHotkeyTextBox.Text.Trim();
-        _workingCopy.AnalyzeSelectionHotkey = AnalyzeHotkeyTextBox.Text.Trim();
+        _workingCopy.SmartActionHotkey = SmartActionHotkeyTextBox.Text.Trim();
+        _workingCopy.CopyFullAnswerHotkey = CopyFullAnswerHotkeyTextBox.Text.Trim();
+        _workingCopy.AnswerClipboardQuestionHotkey = AnswerClipboardQuestionHotkeyTextBox.Text.Trim();
+        _workingCopy.GuidedTypingHotkey = GuidedTypingHotkeyTextBox.Text.Trim();
+        _workingCopy.ToggleMobileHotkey = ToggleMobileHotkeyTextBox.Text.Trim();
         _workingCopy.CycleCandidatesHotkey = CandidateHotkeyTextBox.Text.Trim();
-        _workingCopy.WordExerciseHotkey = WordExerciseHotkeyTextBox.Text.Trim();
+        _workingCopy.WordExerciseHotkey = _workingCopy.SmartActionHotkey;
         _workingCopy.VisionScreenshotHotkey = VisionScreenshotHotkeyTextBox.Text.Trim();
+
+        var hotkeys = new[]
+        {
+            _workingCopy.ToggleAssistantHotkey,
+            _workingCopy.SmartActionHotkey,
+            _workingCopy.CopyFullAnswerHotkey,
+            _workingCopy.AnswerClipboardQuestionHotkey,
+            _workingCopy.VisionScreenshotHotkey,
+            _workingCopy.GuidedTypingHotkey,
+            _workingCopy.ToggleMobileHotkey,
+            _workingCopy.CycleCandidatesHotkey,
+            "Win+PageUp",
+            "Win+PageDown"
+        };
+        if (!GlobalHotkeyService.TryValidateShortcutSet(hotkeys, out var hotkeyError))
+        {
+            System.Windows.MessageBox.Show(
+                this,
+                hotkeyError,
+                "设置无法保存",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
 
         UpdatedSettings = _workingCopy;
         DialogResult = true;
+    }
+
+    private bool TryApplyDatabaseControls(bool showMessage)
+    {
+        if (!int.TryParse(DatabasePortTextBox.Text, out var port) ||
+            !int.TryParse(DatabaseConnectTimeoutTextBox.Text, out var connectTimeout) ||
+            !int.TryParse(DatabaseQueryTimeoutTextBox.Text, out var queryTimeout) ||
+            !int.TryParse(DatabaseMaximumRowsTextBox.Text, out var maximumRows) ||
+            !int.TryParse(DatabaseMaximumKilobytesTextBox.Text, out var maximumKilobytes))
+        {
+            if (showMessage)
+            {
+                System.Windows.MessageBox.Show(
+                    this,
+                    "数据库端口、超时、最大行数和最大结果必须填写有效整数。",
+                    "数据库设置无效",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+            return false;
+        }
+
+        var database = _workingCopy.DatabaseConnection;
+        database.Enabled = DatabaseEnabledCheckBox.IsChecked == true;
+        database.DisplayName = DatabaseDisplayNameTextBox.Text.Trim();
+        database.Host = DatabaseHostTextBox.Text.Trim();
+        database.Port = Math.Clamp(port, 1, 65535);
+        database.Username = DatabaseUsernameTextBox.Text.Trim();
+        database.Database = DatabaseNameTextBox.Text.Trim();
+        database.SslMode = DatabaseSslModeComboBox.SelectedValue?.ToString() ?? "Preferred";
+        database.ConnectionTimeoutSeconds = Math.Clamp(connectTimeout, 2, 30);
+        database.QueryTimeoutSeconds = Math.Clamp(queryTimeout, 2, 30);
+        database.MaximumRows = Math.Clamp(maximumRows, 1, 200);
+        database.MaximumResultBytes = (int)Math.Clamp((long)maximumKilobytes * 1024, 8_192L, 262_144L);
+        if (database.Enabled &&
+            (string.IsNullOrWhiteSpace(database.Host) ||
+             string.IsNullOrWhiteSpace(database.Username)))
+        {
+            if (showMessage)
+            {
+                System.Windows.MessageBox.Show(
+                    this,
+                    "启用数据库增强时，必须填写主机和用户名；优先数据库可以留空。",
+                    "数据库设置无效",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private async void TestDatabaseButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (!TryApplyDatabaseControls(showMessage: true))
+        {
+            return;
+        }
+
+        var database = _workingCopy.DatabaseConnection;
+        var password = DatabasePasswordBox.Password;
+        if (string.IsNullOrEmpty(password) && ClearDatabasePasswordCheckBox.IsChecked != true)
+        {
+            try
+            {
+                password = WindowsCredentialService.ReadDatabasePassword(database.ProfileId) ?? string.Empty;
+            }
+            catch (Exception ex)
+            {
+                DatabaseTestStatusText.Text = $"读取凭据失败：{ex.Message}";
+                return;
+            }
+        }
+        if (string.IsNullOrEmpty(password))
+        {
+            DatabaseTestStatusText.Text = "请填写新密码，或先保存一个数据库密码。";
+            return;
+        }
+
+        TestDatabaseButton.IsEnabled = false;
+        DatabaseTestStatusText.Text = "正在测试连接……";
+        try
+        {
+            using var timeout = new CancellationTokenSource(
+                TimeSpan.FromSeconds(database.ConnectionTimeoutSeconds + 2));
+            var result = await _databaseService.TestConnectionAsync(database, password, timeout.Token);
+            DatabaseTestStatusText.Text = result.IsSuccess
+                ? $"{result.Message} MySQL {result.ServerVersion}"
+                : result.Message;
+        }
+        catch (OperationCanceledException)
+        {
+            DatabaseTestStatusText.Text = "连接测试已超时。";
+        }
+        finally
+        {
+            TestDatabaseButton.IsEnabled = true;
+        }
     }
 }

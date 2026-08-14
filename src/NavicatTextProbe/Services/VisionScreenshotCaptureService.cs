@@ -22,7 +22,9 @@ internal sealed class VisionScreenshotCaptureService
         _documentContextProbeService = documentContextProbeService;
     }
 
-    public async Task<VisionCaptureSnapshot> CaptureAsync(CancellationToken cancellationToken)
+    public async Task<VisionCaptureSnapshot> CaptureAsync(
+        CancellationToken cancellationToken,
+        string captureScope = "ForegroundWindow")
     {
         var foreground = DocumentContextProbeService.ReadForegroundWindow();
         if (foreground.WindowHandle == nint.Zero)
@@ -64,26 +66,19 @@ internal sealed class VisionScreenshotCaptureService
 
         caret ??= await Task.Run(() => ForegroundCaretLocator.Locate(foreground), cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        if (caret is null)
-        {
-            return Failure(
-                VisionCaptureStatus.CaretUnavailable,
-                "没有取得可靠的文本插入光标。请单击题目或答案文字、取消选区后重试。",
-                foreground);
-        }
-
         return await Task.Run(
-            () => CaptureWindow(foreground, caret),
+            () => CaptureWindow(foreground, caret, captureScope),
             cancellationToken);
     }
 
     private static VisionCaptureSnapshot CaptureWindow(
         ForegroundWindowContext foreground,
-        CaretLocation caret)
+        CaretLocation? caret,
+        string captureScope)
     {
         try
         {
-            var windowBounds = ReadWindowBounds(foreground.RootWindowHandle);
+            var windowBounds = ReadCaptureBounds(foreground.RootWindowHandle, captureScope, caret);
             if (windowBounds.IsEmpty)
             {
                 return Failure(
@@ -92,9 +87,13 @@ internal sealed class VisionScreenshotCaptureService
                     foreground);
             }
 
-            var caretCenterX = caret.Bounds.Left + Math.Max(1, caret.Bounds.Width / 2);
-            var caretCenterY = caret.Bounds.Top + Math.Max(1, caret.Bounds.Height / 2);
-            if (!windowBounds.Contains(caretCenterX, caretCenterY))
+            var caretCenterX = caret is null
+                ? windowBounds.Left + windowBounds.Width / 2
+                : caret.Bounds.Left + Math.Max(1, caret.Bounds.Width / 2);
+            var caretCenterY = caret is null
+                ? windowBounds.Top + windowBounds.Height / 2
+                : caret.Bounds.Top + Math.Max(1, caret.Bounds.Height / 2);
+            if (caret is not null && !windowBounds.Contains(caretCenterX, caretCenterY))
             {
                 return Failure(
                     VisionCaptureStatus.CaretUnavailable,
@@ -127,7 +126,10 @@ internal sealed class VisionScreenshotCaptureService
             using var detailBitmap = fullBitmap.Clone(detailRectangle, PixelFormat.Format32bppArgb);
             var detailMarkerX = relativeCaretX - detailRectangle.Left;
             var detailMarkerY = relativeCaretY - detailRectangle.Top;
-            DrawCaretMarker(detailBitmap, detailMarkerX, detailMarkerY);
+            if (caret is not null)
+            {
+                DrawCaretMarker(detailBitmap, detailMarkerX, detailMarkerY);
+            }
 
             using var scaledFullBitmap = ScaleDown(fullBitmap, MaximumFullDimension);
             var fullBytes = EncodeJpegToLimit(scaledFullBitmap, MaximumImageBytes);
@@ -142,14 +144,20 @@ internal sealed class VisionScreenshotCaptureService
             return new VisionCaptureSnapshot
             {
                 Status = VisionCaptureStatus.Captured,
-                Message = "已截取前台窗口并标记文本光标。",
+                Message = caret is null
+                    ? string.Equals(captureScope, "CurrentMonitor", StringComparison.OrdinalIgnoreCase)
+                        ? "已截取当前显示器；未取得可靠文本光标，将只回答可见内容。"
+                        : "已截取前台窗口；未取得可靠文本光标，将只回答可见内容。"
+                    : string.Equals(captureScope, "CurrentMonitor", StringComparison.OrdinalIgnoreCase)
+                        ? "已截取当前显示器并标记文本光标。"
+                        : "已截取前台窗口并标记文本光标。",
                 ProcessId = foreground.ProcessId,
                 ProcessName = foreground.ProcessName,
                 WindowHandle = foreground.RootWindowHandle.ToInt64(),
                 WindowBounds = windowBounds,
-                CaretScreenBounds = caret.Bounds,
-                CaretSource = caret.Source,
-                CaretConfidence = caret.Confidence,
+                CaretScreenBounds = caret?.Bounds ?? default,
+                CaretSource = caret?.Source ?? "未取得可靠文本光标",
+                CaretConfidence = caret?.Confidence ?? 0,
                 DetailBounds = new PixelRect(
                     windowBounds.Left + detailRectangle.Left,
                     windowBounds.Top + detailRectangle.Top,
@@ -191,6 +199,25 @@ internal sealed class VisionScreenshotCaptureService
         var right = Math.Min(nativeBounds.Right, virtualScreen.Right);
         var bottom = Math.Min(nativeBounds.Bottom, virtualScreen.Bottom);
         return new PixelRect(left, top, right - left, bottom - top);
+    }
+
+    private static PixelRect ReadCaptureBounds(
+        nint windowHandle,
+        string captureScope,
+        CaretLocation? caret)
+    {
+        if (!string.Equals(captureScope, "CurrentMonitor", StringComparison.OrdinalIgnoreCase))
+        {
+            return ReadWindowBounds(windowHandle);
+        }
+
+        var screen = caret is null
+            ? System.Windows.Forms.Screen.FromHandle(windowHandle)
+            : System.Windows.Forms.Screen.FromPoint(new Point(
+                caret.Bounds.Left + Math.Max(1, caret.Bounds.Width / 2),
+                caret.Bounds.Top + Math.Max(1, caret.Bounds.Height / 2)));
+        var bounds = screen.Bounds;
+        return new PixelRect(bounds.Left, bounds.Top, bounds.Width, bounds.Height);
     }
 
     internal static Rectangle BuildDetailRectangle(

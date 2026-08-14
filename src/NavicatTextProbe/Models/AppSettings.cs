@@ -9,6 +9,22 @@ public sealed record DisplayStyle
     public double BackgroundOpacity { get; set; } = 0.82;
 }
 
+public sealed record DatabaseConnectionSettings
+{
+    public string ProfileId { get; set; } = "default";
+    public bool Enabled { get; set; }
+    public string DisplayName { get; set; } = "当前 MySQL";
+    public string Host { get; set; } = string.Empty;
+    public int Port { get; set; } = 3306;
+    public string Username { get; set; } = string.Empty;
+    public string Database { get; set; } = string.Empty;
+    public string SslMode { get; set; } = "Preferred";
+    public int ConnectionTimeoutSeconds { get; set; } = 5;
+    public int QueryTimeoutSeconds { get; set; } = 5;
+    public int MaximumRows { get; set; } = 50;
+    public int MaximumResultBytes { get; set; } = 65_536;
+}
+
 public sealed record AppSettings
 {
     public int SettingsVersion { get; set; }
@@ -19,6 +35,10 @@ public sealed record AppSettings
     public bool VisionEnabled { get; set; } = true;
     public string VisionApiBaseUrl { get; set; } = "https://open.bigmodel.cn/api/paas/v4";
     public string VisionModel { get; set; } = "glm-4.6v";
+    public bool FallbackEnabled { get; set; } = true;
+    public string FallbackApiBaseUrl { get; set; } = "https://open.bigmodel.cn/api/paas/v4";
+    public string FallbackModel { get; set; } = "glm-5.2";
+    public string VisionCaptureScope { get; set; } = "CurrentMonitor";
     public string CustomGlobalPrompt { get; set; } = string.Empty;
     public int PredictionDebounceMilliseconds { get; set; } = 850;
     public int PredictionMinimumIntervalMilliseconds { get; set; } = 1400;
@@ -26,13 +46,20 @@ public sealed record AppSettings
     public double TaskbarWidth { get; set; } = 640;
     public bool MobileServerEnabled { get; set; }
     public bool KeyboardFallbackEnabled { get; set; }
+    public bool GuidedTypingEnabled { get; set; } = true;
     public int MobilePort { get; set; } = 17832;
     public string MobileAccessToken { get; set; } = string.Empty;
     public string ToggleAssistantHotkey { get; set; } = "Ctrl+Alt+S";
+    public string SmartActionHotkey { get; set; } = "Ctrl+Alt+A";
+    public string CopyFullAnswerHotkey { get; set; } = "Ctrl+Alt+C";
+    public string AnswerClipboardQuestionHotkey { get; set; } = "Ctrl+Alt+V";
+    public string GuidedTypingHotkey { get; set; } = "Ctrl+Alt+D";
+    public string ToggleMobileHotkey { get; set; } = "Ctrl+Alt+M";
     public string CycleCandidatesHotkey { get; set; } = "Ctrl+Alt+R";
     public string AnalyzeSelectionHotkey { get; set; } = "Ctrl+Alt+E";
     public string WordExerciseHotkey { get; set; } = "Ctrl+Alt+A";
-    public string VisionScreenshotHotkey { get; set; } = "Ctrl+Shift+C";
+    public string VisionScreenshotHotkey { get; set; } = "Ctrl+Alt+O";
+    public DatabaseConnectionSettings DatabaseConnection { get; set; } = new();
     public DisplayStyle TaskbarStyle { get; set; } = new()
     {
         FontSize = 11,

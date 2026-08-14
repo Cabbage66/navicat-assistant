@@ -495,10 +495,31 @@ internal sealed class NavicatProbeService
             "Win32 WM_GETTEXT（Navicat 编辑器全文）",
             text,
             null,
-            null,
+            TryReadSelectionLength(element),
             truncated,
             isFocusChain,
             diagnostic));
+    }
+
+    private static int? TryReadSelectionLength(AutomationElement element)
+    {
+        try
+        {
+            if (!element.TryGetCurrentPattern(TextPattern.Pattern, out var rawPattern) ||
+                rawPattern is not TextPattern pattern)
+            {
+                return null;
+            }
+
+            var selections = pattern.GetSelection();
+            return selections.Length == 0
+                ? 0
+                : selections[0].GetText(MaxTextCharacters)?.Length ?? 0;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     internal static bool IsLikelyUiAutomationNameTruncated(int textLength) =>

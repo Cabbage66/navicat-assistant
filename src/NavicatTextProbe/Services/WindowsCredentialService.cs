@@ -8,6 +8,7 @@ internal static class WindowsCredentialService
 {
     private const string DeepSeekTargetName = "NavicatSqlCopilot/DeepSeekApiKey";
     private const string ZhipuTargetName = "Assistant/ZhipuApiKey";
+    private const string DatabaseTargetPrefix = "Assistant/MySql/";
     private const uint CredentialTypeGeneric = 1;
     private const uint CredentialPersistLocalMachine = 2;
 
@@ -25,15 +26,30 @@ internal static class WindowsCredentialService
 
     public static void DeleteZhipuApiKey() => Delete(ZhipuTargetName);
 
-    private static void Save(string targetName, string userName, string apiKey)
+    public static void SaveDatabasePassword(string profileId, string username, string password) =>
+        Save(DatabaseTargetName(profileId), username, password, trimSecret: false);
+
+    public static string? ReadDatabasePassword(string profileId) => Read(DatabaseTargetName(profileId));
+
+    public static void DeleteDatabasePassword(string profileId) => Delete(DatabaseTargetName(profileId));
+
+    private static string DatabaseTargetName(string profileId)
     {
-        if (string.IsNullOrWhiteSpace(apiKey))
+        var safeId = string.Concat((profileId ?? string.Empty)
+            .Where(character => char.IsLetterOrDigit(character) || character is '-' or '_'));
+        return DatabaseTargetPrefix + (safeId.Length == 0 ? "default" : safeId);
+    }
+
+    private static void Save(string targetName, string userName, string secret, bool trimSecret = true)
+    {
+        var persistedSecret = trimSecret ? secret.Trim() : secret;
+        if (persistedSecret.Length == 0)
         {
             Delete(targetName);
             return;
         }
 
-        var bytes = Encoding.Unicode.GetBytes(apiKey.Trim());
+        var bytes = Encoding.Unicode.GetBytes(persistedSecret);
         var blob = Marshal.AllocHGlobal(bytes.Length);
         try
         {
@@ -50,12 +66,14 @@ internal static class WindowsCredentialService
 
             if (!CredWrite(ref credential, 0))
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "保存 API Key 到 Windows 凭据管理器失败。");
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "保存敏感凭据到 Windows 凭据管理器失败。");
             }
         }
         finally
         {
+            Marshal.Copy(new byte[bytes.Length], 0, blob, bytes.Length);
             Marshal.FreeHGlobal(blob);
+            Array.Clear(bytes);
         }
     }
 

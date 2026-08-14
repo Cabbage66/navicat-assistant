@@ -42,6 +42,8 @@ internal sealed record VisionCaptureSnapshot
 
     public bool IsCaptured => Status == VisionCaptureStatus.Captured;
 
+    public bool HasReliableCaret => CaretConfidence >= 0.5 && !CaretScreenBounds.IsEmpty;
+
     public static VisionCaptureSnapshot Failure(
         VisionCaptureStatus status,
         string message,

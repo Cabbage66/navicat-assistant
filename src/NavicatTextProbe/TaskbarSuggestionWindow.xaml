@@ -11,12 +11,36 @@
         <Border.ContextMenu>
             <ContextMenu>
                 <MenuItem Header="打开设置" Click="OpenSettingsMenuItem_OnClick" />
+                <MenuItem Header="翻页：Win+PageUp / Win+PageDown" IsEnabled="False" />
                 <MenuItem Header="隐藏 Assistant（Ctrl+Alt+S）" Click="HideMenuItem_OnClick" />
             </ContextMenu>
         </Border.ContextMenu>
-        <TextBlock x:Name="SuggestionText" FontFamily="Cascadia Mono, Consolas"
-                   TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
-                   VerticalAlignment="Center" Foreground="White"
-                   Text="等待 SQL 建议……" />
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="27" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition x:Name="PageIndicatorColumn" Width="0" />
+            </Grid.ColumnDefinitions>
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Left">
+                <Ellipse x:Name="MainStatusDot" Width="5" Height="5" Margin="0,0,0,2" Fill="#3498DB" ToolTip="主流程：等待" />
+                <Ellipse x:Name="DatabaseStatusDot" Width="5" Height="5" Margin="0,0,0,2" Fill="#7F8C8D" ToolTip="数据库增强：未使用" />
+                <Ellipse x:Name="GuidedTypingStatusDot" Width="5" Height="5" Fill="#7F8C8D" ToolTip="受控代打：关闭" />
+            </StackPanel>
+            <ScrollViewer x:Name="SuggestionScroller" Grid.Column="1"
+                          HorizontalScrollBarVisibility="Disabled"
+                          VerticalScrollBarVisibility="Hidden"
+                          CanContentScroll="False"
+                          Focusable="False"
+                          VerticalAlignment="Center">
+                <TextBlock x:Name="SuggestionText" FontFamily="Cascadia Mono, Consolas"
+                           TextWrapping="Wrap"
+                           VerticalAlignment="Top" Foreground="White"
+                           Text="等待 SQL 建议……" />
+            </ScrollViewer>
+            <TextBlock x:Name="PageIndicator" Grid.Column="2" Margin="6,0,0,0"
+                       HorizontalAlignment="Right" VerticalAlignment="Center"
+                       Foreground="White" Opacity="0.72"
+                       TextAlignment="Right" Visibility="Collapsed" />
+        </Grid>
     </Border>
 </Window>

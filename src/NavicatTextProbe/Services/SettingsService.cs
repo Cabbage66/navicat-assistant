@@ -121,6 +121,43 @@ internal sealed class SettingsService
             settings.SettingsVersion = 5;
         }
 
+        if (settings.SettingsVersion < 6)
+        {
+            settings.SmartActionHotkey = string.IsNullOrWhiteSpace(settings.WordExerciseHotkey)
+                ? "Ctrl+Alt+A"
+                : settings.WordExerciseHotkey;
+            settings.GuidedTypingHotkey = "Ctrl+Alt+D";
+            settings.ToggleMobileHotkey = "Ctrl+Alt+M";
+            if (string.Equals(settings.VisionScreenshotHotkey, "Ctrl+Shift+C", StringComparison.OrdinalIgnoreCase))
+            {
+                settings.VisionScreenshotHotkey = "Ctrl+Alt+O";
+            }
+            settings.GuidedTypingEnabled = true;
+            settings.VisionCaptureScope = "CurrentMonitor";
+            settings.DatabaseConnection ??= new DatabaseConnectionSettings();
+            settings.SettingsVersion = 6;
+        }
+
+        if (settings.SettingsVersion < 7)
+        {
+            settings.CopyFullAnswerHotkey = "Ctrl+Alt+C";
+            settings.SettingsVersion = 7;
+        }
+
+        if (settings.SettingsVersion < 8)
+        {
+            settings.AnswerClipboardQuestionHotkey = "Ctrl+Alt+V";
+            settings.SettingsVersion = 8;
+        }
+
+        if (settings.SettingsVersion < 9)
+        {
+            settings.FallbackEnabled = true;
+            settings.FallbackApiBaseUrl = "https://open.bigmodel.cn/api/paas/v4";
+            settings.FallbackModel = "glm-5.2";
+            settings.SettingsVersion = 9;
+        }
+
         settings.ApiBaseUrl = string.IsNullOrWhiteSpace(settings.ApiBaseUrl)
             ? "https://api.deepseek.com"
             : settings.ApiBaseUrl.TrimEnd('/');
@@ -133,12 +170,66 @@ internal sealed class SettingsService
         settings.VisionModel = string.IsNullOrWhiteSpace(settings.VisionModel)
             ? "glm-4.6v"
             : settings.VisionModel.Trim();
+        settings.FallbackApiBaseUrl = string.IsNullOrWhiteSpace(settings.FallbackApiBaseUrl)
+            ? "https://open.bigmodel.cn/api/paas/v4"
+            : settings.FallbackApiBaseUrl.TrimEnd('/');
+        settings.FallbackModel = string.IsNullOrWhiteSpace(settings.FallbackModel)
+            ? "glm-5.2"
+            : settings.FallbackModel.Trim();
+        settings.VisionCaptureScope = string.Equals(
+            settings.VisionCaptureScope,
+            "ForegroundWindow",
+            StringComparison.OrdinalIgnoreCase)
+            ? "ForegroundWindow"
+            : "CurrentMonitor";
+        settings.SmartActionHotkey = string.IsNullOrWhiteSpace(settings.SmartActionHotkey)
+            ? "Ctrl+Alt+A"
+            : settings.SmartActionHotkey.Trim();
+        settings.CopyFullAnswerHotkey = string.IsNullOrWhiteSpace(settings.CopyFullAnswerHotkey)
+            ? "Ctrl+Alt+C"
+            : settings.CopyFullAnswerHotkey.Trim();
+        settings.AnswerClipboardQuestionHotkey = string.IsNullOrWhiteSpace(settings.AnswerClipboardQuestionHotkey)
+            ? "Ctrl+Alt+V"
+            : settings.AnswerClipboardQuestionHotkey.Trim();
+        settings.GuidedTypingHotkey = string.IsNullOrWhiteSpace(settings.GuidedTypingHotkey)
+            ? "Ctrl+Alt+D"
+            : settings.GuidedTypingHotkey.Trim();
+        settings.ToggleMobileHotkey = string.IsNullOrWhiteSpace(settings.ToggleMobileHotkey)
+            ? "Ctrl+Alt+M"
+            : settings.ToggleMobileHotkey.Trim();
         settings.WordExerciseHotkey = string.IsNullOrWhiteSpace(settings.WordExerciseHotkey)
             ? "Ctrl+Alt+A"
             : settings.WordExerciseHotkey.Trim();
+        // Word exercise recognition is now one branch of the unified smart action.
+        settings.WordExerciseHotkey = settings.SmartActionHotkey;
         settings.VisionScreenshotHotkey = string.IsNullOrWhiteSpace(settings.VisionScreenshotHotkey)
-            ? "Ctrl+Shift+C"
+            ? "Ctrl+Alt+O"
             : settings.VisionScreenshotHotkey.Trim();
+        settings.DatabaseConnection ??= new DatabaseConnectionSettings();
+        settings.DatabaseConnection.ProfileId = string.IsNullOrWhiteSpace(settings.DatabaseConnection.ProfileId)
+            ? "default"
+            : settings.DatabaseConnection.ProfileId.Trim();
+        settings.DatabaseConnection.DisplayName = string.IsNullOrWhiteSpace(settings.DatabaseConnection.DisplayName)
+            ? "当前 MySQL"
+            : settings.DatabaseConnection.DisplayName.Trim();
+        settings.DatabaseConnection.Host = settings.DatabaseConnection.Host?.Trim() ?? string.Empty;
+        settings.DatabaseConnection.Username = settings.DatabaseConnection.Username?.Trim() ?? string.Empty;
+        settings.DatabaseConnection.Database = settings.DatabaseConnection.Database?.Trim() ?? string.Empty;
+        settings.DatabaseConnection.SslMode = NormalizeDatabaseSslMode(settings.DatabaseConnection.SslMode);
+        settings.DatabaseConnection.Port = Math.Clamp(settings.DatabaseConnection.Port, 1, 65535);
+        settings.DatabaseConnection.ConnectionTimeoutSeconds = Math.Clamp(
+            settings.DatabaseConnection.ConnectionTimeoutSeconds,
+            2,
+            30);
+        settings.DatabaseConnection.QueryTimeoutSeconds = Math.Clamp(
+            settings.DatabaseConnection.QueryTimeoutSeconds,
+            2,
+            30);
+        settings.DatabaseConnection.MaximumRows = Math.Clamp(settings.DatabaseConnection.MaximumRows, 1, 200);
+        settings.DatabaseConnection.MaximumResultBytes = Math.Clamp(
+            settings.DatabaseConnection.MaximumResultBytes,
+            8_192,
+            262_144);
         settings.MobilePort = Math.Clamp(settings.MobilePort, 1024, 65535);
         settings.PredictionDebounceMilliseconds = Math.Clamp(settings.PredictionDebounceMilliseconds, 150, 5000);
         settings.PredictionMinimumIntervalMilliseconds = Math.Clamp(settings.PredictionMinimumIntervalMilliseconds, 500, 5000);
@@ -173,4 +264,13 @@ internal sealed class SettingsService
         style.BackgroundColor = string.IsNullOrWhiteSpace(style.BackgroundColor) ? "#17202A" : style.BackgroundColor.Trim();
         style.FontColor = string.IsNullOrWhiteSpace(style.FontColor) ? "#F8F9F9" : style.FontColor.Trim();
     }
+
+    private static string NormalizeDatabaseSslMode(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "disabled" or "none" => "Disabled",
+        "required" => "Required",
+        "verifyca" => "VerifyCA",
+        "verifyfull" => "VerifyFull",
+        _ => "Preferred"
+    };
 }
