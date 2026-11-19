@@ -436,7 +436,7 @@ bool TestDisabledAssistantHotkeySet()
 
 Check("hotkey validation recognizes aliases and fixed paging conflicts",
     GlobalHotkeyService.TryValidateShortcutSet(
-        ["Ctrl+Alt+A", "Ctrl+Alt+C", "Ctrl+Alt+V", "Ctrl+Alt+O", "Win+PageUp", "Win+PageDown"],
+        ["Ctrl+Alt+A", "Ctrl+Alt+C", "Ctrl+Alt+V", "Ctrl+Alt+O", "Ctrl+Alt+P", "Win+PageUp", "Win+PageDown"],
         out _) &&
     !GlobalHotkeyService.TryValidateShortcutSet(["Ctrl+Alt+A", "Control+Alt+A"], out _) &&
     !GlobalHotkeyService.TryValidateShortcutSet(["Ctrl+Alt+A", "not-a-hotkey"], out _));
@@ -1249,7 +1249,7 @@ try
     Check("taskbar width is clamped to the supported range", migratedSettings.Current.TaskbarWidth == 1400);
     Check("global assistant hotkey defaults to Ctrl+Alt+S", migratedSettings.Current.ToggleAssistantHotkey == "Ctrl+Alt+S");
     Check("core hotkeys and database settings migrate to the unified defaults",
-        migratedSettings.Current.SettingsVersion == 9 &&
+        migratedSettings.Current.SettingsVersion == 10 &&
         migratedSettings.Current.WordExerciseHotkey == "Ctrl+Alt+A" &&
         migratedSettings.Current.SmartActionHotkey == "Ctrl+Alt+A" &&
         migratedSettings.Current.CopyFullAnswerHotkey == "Ctrl+Alt+C" &&
@@ -1257,6 +1257,7 @@ try
         migratedSettings.Current.VisionScreenshotHotkey == "Ctrl+Alt+O" &&
         migratedSettings.Current.GuidedTypingHotkey == "Ctrl+Alt+D" &&
         migratedSettings.Current.ToggleMobileHotkey == "Ctrl+Alt+M" &&
+        migratedSettings.Current.ToggleMobilePrivacyHotkey == "Ctrl+Alt+P" &&
         migratedSettings.Current.DatabaseConnection.ProfileId == "default" &&
         migratedSettings.Current.VisionModel == "glm-4.6v" &&
         migratedSettings.Current.FallbackEnabled &&
@@ -1496,7 +1497,7 @@ finally
 await using var mobileServer = new MobileServerService();
 var mobilePage = (string)typeof(MobileServerService)
     .GetMethod("BuildPage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-    .Invoke(null, null)!;
+    .Invoke(null, new object[] { "self-test-token" })!;
 Check("mobile page exposes the full Word question, full answer and current continuation",
     mobilePage.Contains("id=\"question\"", StringComparison.Ordinal) &&
     mobilePage.Contains("id=\"fullAnswer\"", StringComparison.Ordinal) &&
@@ -1508,10 +1509,68 @@ Check("mobile page exposes the full Word question, full answer and current conti
     mobilePage.Contains("mainLight", StringComparison.Ordinal) &&
     mobilePage.Contains("databaseLight", StringComparison.Ordinal) &&
     mobilePage.Contains("typingLight", StringComparison.Ordinal));
+Check("mobile page is PWA-installable and supports the privacy black screen",
+    mobilePage.Contains(@"rel=""manifest""", StringComparison.Ordinal) &&
+    mobilePage.Contains("/manifest.webmanifest?token=self-test-token", StringComparison.Ordinal) &&
+    mobilePage.Contains(@"rel=""apple-touch-icon""", StringComparison.Ordinal) &&
+    mobilePage.Contains(@"id=""privacyOverlay""", StringComparison.Ordinal) &&
+    mobilePage.Contains("$('privacyOverlay').hidden=!x.privacyMode;", StringComparison.Ordinal) &&
+    mobilePage.Contains("serviceWorker.register", StringComparison.Ordinal) &&
+    mobilePage.Contains("手机页隐私黑屏快捷键", StringComparison.Ordinal) &&
+    !mobilePage.Contains("__ASSISTANT_TOKEN__", StringComparison.Ordinal));
+var manifestJson = JsonSerializer.Deserialize<JsonElement>(MobileServerService.BuildManifestJson("self-test-token"));
+Check("PWA manifest points at the tokenized start URL and both icon sizes",
+    manifestJson.GetProperty("display").GetString() == "standalone" &&
+    manifestJson.GetProperty("start_url").GetString() == "/?token=self-test-token" &&
+    manifestJson.GetProperty("icons").GetArrayLength() == 2);
+var iconBytes = MobileServerService.RenderAppIconPng(192);
+Check("PWA icon renders a valid PNG at the requested size",
+    iconBytes.Length > 100 &&
+    iconBytes[0] == 137 && iconBytes[1] == 80 && iconBytes[2] == 78 && iconBytes[3] == 71 &&
+    MobileServerService.RenderAppIconPng(512).Length > iconBytes.Length);
+Check("PWA service worker activates without caching the tokenized API",
+    MobileServerService.BuildServiceWorkerScript().Contains("self.skipWaiting", StringComparison.Ordinal) &&
+    MobileServerService.BuildServiceWorkerScript().Contains("clients.claim", StringComparison.Ordinal));
 var accessUrls = mobileServer.GetAccessUrls(new AppSettings { MobileAccessToken = "self-test-token", MobilePort = 17832 });
 Check("localhost is the first desktop URL", new Uri(accessUrls[0]).Host == "127.0.0.1");
 var preferredPhoneHost = accessUrls.Skip(1).Select(url => new Uri(url).Host).FirstOrDefault();
 Check("APIPA is never selected as the preferred phone URL", preferredPhoneHost is null || !preferredPhoneHost.StartsWith("169.254.", StringComparison.Ordinal));
+
+var privacyProbe = new TcpListener(IPAddress.Loopback, 0);
+privacyProbe.Start();
+var privacyPort = ((IPEndPoint)privacyProbe.LocalEndpoint).Port;
+privacyProbe.Stop();
+var pwaSettings = new AppSettings
+{
+    MobileAccessToken = "pwa-self-test-token",
+    MobilePort = privacyPort,
+    MobileServerEnabled = true
+};
+var pwaServer = new MobileServerService();
+var pwaServerStarted = await pwaServer.StartAsync(pwaSettings);
+using var http = new HttpClient();
+var stateUrl = $"http://127.0.0.1:{privacyPort}/api/state?token=pwa-self-test-token";
+var privacyBefore = JsonSerializer.Deserialize<JsonElement>(await http.GetStringAsync(stateUrl))
+    .GetProperty("privacyMode")
+    .GetBoolean();
+pwaServer.PrivacyMode = true;
+var privacyAfter = JsonSerializer.Deserialize<JsonElement>(await http.GetStringAsync(stateUrl))
+    .GetProperty("privacyMode")
+    .GetBoolean();
+var pwaPage = await http.GetStringAsync($"http://127.0.0.1:{privacyPort}/?token=pwa-self-test-token");
+var pwaManifest = await http.GetStringAsync($"http://127.0.0.1:{privacyPort}/manifest.webmanifest?token=pwa-self-test-token");
+var pwaIcon = await http.GetByteArrayAsync($"http://127.0.0.1:{privacyPort}/icon-512.png?token=pwa-self-test-token");
+var pwaServiceWorker = await http.GetStringAsync($"http://127.0.0.1:{privacyPort}/sw.js?token=pwa-self-test-token");
+Check("mobile state exposes the privacy flag and toggles live",
+    pwaServerStarted && !privacyBefore && privacyAfter);
+Check("PWA endpoints serve page, manifest, icon and service worker over the phone port",
+    pwaPage.Contains("privacyOverlay", StringComparison.Ordinal) &&
+    pwaPage.Contains("manifest.webmanifest", StringComparison.Ordinal) &&
+    pwaManifest.Contains("standalone", StringComparison.Ordinal) &&
+    pwaManifest.Contains("pwa-self-test-token", StringComparison.Ordinal) &&
+    pwaIcon.Length > 100 && pwaIcon[0] == 137 &&
+    pwaServiceWorker.Contains("skipWaiting", StringComparison.Ordinal));
+await pwaServer.DisposeAsync();
 
 if (failures.Count == 0)
 {

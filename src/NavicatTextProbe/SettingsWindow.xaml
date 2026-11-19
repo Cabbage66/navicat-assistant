@@ -281,6 +281,8 @@
                                 <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="210" />
@@ -302,6 +304,8 @@
                             <TextBox x:Name="ToggleMobileHotkeyTextBox" Grid.Row="6" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
                             <TextBlock Grid.Row="7" Margin="0,8,0,0" VerticalAlignment="Center" Text="进阶：生成/切换 3 个候选" />
                             <TextBox x:Name="CandidateHotkeyTextBox" Grid.Row="7" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
+                            <TextBlock Grid.Row="8" Margin="0,8,0,0" VerticalAlignment="Center" Text="手机页隐私黑屏开关" />
+                            <TextBox x:Name="ToggleMobilePrivacyHotkeyTextBox" Grid.Row="8" Grid.Column="1" Margin="0,8,0,0" Padding="6,2" />
                         </Grid>
                         <TextBlock Margin="0,10,0,0" Foreground="#667788" TextWrapping="Wrap"
                                    Text="Assistant 默认独占拦截这些业务快捷键：命中后不再传给钉钉等普通应用。任务栏翻页固定使用 Win+PageUp / Win+PageDown；总开关关闭后只保留整体启停键。Windows 安全界面、系统保留组合键和权限更高的程序不受此保证。" />

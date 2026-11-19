@@ -2057,6 +2057,7 @@ public partial class MainWindow : Window
             shortcuts[HotkeyAction.AnswerClipboardQuestion] = settings.AnswerClipboardQuestionHotkey;
             shortcuts[HotkeyAction.CycleCandidates] = settings.CycleCandidatesHotkey;
             shortcuts[HotkeyAction.ToggleMobile] = settings.ToggleMobileHotkey;
+            shortcuts[HotkeyAction.ToggleMobilePrivacy] = settings.ToggleMobilePrivacyHotkey;
             if (settings.GuidedTypingEnabled)
             {
                 shortcuts[HotkeyAction.ToggleGuidedTyping] = settings.GuidedTypingHotkey;
@@ -2072,7 +2073,7 @@ public partial class MainWindow : Window
         var errors = _hotkeyService.Register(new WindowInteropHelper(this).Handle, shortcuts);
         HotkeyStatusText.Text = errors.Count == 0
             ? settings.AssistantEnabled
-                ? $"独占快捷键 | 总开关：{settings.ToggleAssistantHotkey} | 智能分析：{settings.SmartActionHotkey} | 当前题答案：{settings.CopyFullAnswerHotkey} | 剪贴板题目：{settings.AnswerClipboardQuestionHotkey} | OCR：{settings.VisionScreenshotHotkey} | 代打：{settings.GuidedTypingHotkey} | 手机：{settings.ToggleMobileHotkey} | 候选：{settings.CycleCandidatesHotkey} | 翻页：Win+PageUp/PageDown"
+                ? $"独占快捷键 | 总开关：{settings.ToggleAssistantHotkey} | 智能分析：{settings.SmartActionHotkey} | 当前题答案：{settings.CopyFullAnswerHotkey} | 剪贴板题目：{settings.AnswerClipboardQuestionHotkey} | OCR：{settings.VisionScreenshotHotkey} | 代打：{settings.GuidedTypingHotkey} | 手机：{settings.ToggleMobileHotkey} | 隐私黑屏：{settings.ToggleMobilePrivacyHotkey} | 候选：{settings.CycleCandidatesHotkey} | 翻页：Win+PageUp/PageDown"
                 : $"独占整体启停：{settings.ToggleAssistantHotkey}（其余快捷键已停用）"
             : string.Join("；", errors);
     }
@@ -2102,6 +2103,7 @@ public partial class MainWindow : Window
             case HotkeyAction.AnswerClipboardQuestion: AnswerClipboardQuestionAsync().Forget(); break;
             case HotkeyAction.ToggleGuidedTyping: ToggleGuidedTyping(); break;
             case HotkeyAction.ToggleMobile: ToggleMobileAsync().Forget(); break;
+            case HotkeyAction.ToggleMobilePrivacy: ToggleMobilePrivacy(); break;
             case HotkeyAction.CycleCandidates: CycleCandidatesAsync().Forget(); break;
             case HotkeyAction.AnalyzeSelection: AnalyzeSelectionAsync(true).Forget(); break;
             case HotkeyAction.IdentifyWordExercise: IdentifyWordExerciseAsync().Forget(); break;
@@ -2904,6 +2906,7 @@ public partial class MainWindow : Window
             if (!string.IsNullOrWhiteSpace(patch.AnswerClipboardQuestionHotkey)) settings.AnswerClipboardQuestionHotkey = patch.AnswerClipboardQuestionHotkey;
             if (!string.IsNullOrWhiteSpace(patch.GuidedTypingHotkey)) settings.GuidedTypingHotkey = patch.GuidedTypingHotkey;
             if (!string.IsNullOrWhiteSpace(patch.ToggleMobileHotkey)) settings.ToggleMobileHotkey = patch.ToggleMobileHotkey;
+            if (!string.IsNullOrWhiteSpace(patch.ToggleMobilePrivacyHotkey)) settings.ToggleMobilePrivacyHotkey = patch.ToggleMobilePrivacyHotkey;
             if (!string.IsNullOrWhiteSpace(patch.VisionScreenshotHotkey)) settings.VisionScreenshotHotkey = patch.VisionScreenshotHotkey;
             if (patch.TaskbarFontSize is double tf) settings.TaskbarStyle.FontSize = tf;
             if (patch.TaskbarLineHeight is double tl) settings.TaskbarStyle.LineHeight = tl;
@@ -2953,6 +2956,15 @@ public partial class MainWindow : Window
         _settingsService.Current.MobileServerEnabled = !_settingsService.Current.MobileServerEnabled;
         _settingsService.Save(_settingsService.Current);
         await ApplySettingsAsync();
+    }
+
+    private void ToggleMobilePrivacy()
+    {
+        var enabled = !_mobileServer.PrivacyMode;
+        _mobileServer.PrivacyMode = enabled;
+        StatusText.Text = enabled
+            ? $"手机页已切换为纯黑屏（按 {_settingsService.Current.ToggleMobilePrivacyHotkey} 恢复正常显示）"
+            : "手机页已恢复正常显示";
     }
 
     private void UpdateChannelStatus()

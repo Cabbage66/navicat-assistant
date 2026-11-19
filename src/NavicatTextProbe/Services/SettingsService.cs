@@ -158,6 +158,12 @@ internal sealed class SettingsService
             settings.SettingsVersion = 9;
         }
 
+        if (settings.SettingsVersion < 10)
+        {
+            settings.ToggleMobilePrivacyHotkey = "Ctrl+Alt+P";
+            settings.SettingsVersion = 10;
+        }
+
         settings.ApiBaseUrl = string.IsNullOrWhiteSpace(settings.ApiBaseUrl)
             ? "https://api.deepseek.com"
             : settings.ApiBaseUrl.TrimEnd('/');
@@ -197,6 +203,9 @@ internal sealed class SettingsService
         settings.ToggleMobileHotkey = string.IsNullOrWhiteSpace(settings.ToggleMobileHotkey)
             ? "Ctrl+Alt+M"
             : settings.ToggleMobileHotkey.Trim();
+        settings.ToggleMobilePrivacyHotkey = string.IsNullOrWhiteSpace(settings.ToggleMobilePrivacyHotkey)
+            ? "Ctrl+Alt+P"
+            : settings.ToggleMobilePrivacyHotkey.Trim();
         settings.WordExerciseHotkey = string.IsNullOrWhiteSpace(settings.WordExerciseHotkey)
             ? "Ctrl+Alt+A"
             : settings.WordExerciseHotkey.Trim();

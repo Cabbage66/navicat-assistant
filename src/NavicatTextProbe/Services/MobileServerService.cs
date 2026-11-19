@@ -1,3 +1,6 @@
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Collections.Concurrent;
 using System.Net;
@@ -25,8 +28,28 @@ internal sealed class MobileServerService : IAsyncDisposable
     private SuggestionResult _suggestion = SuggestionResult.Info("等待 Navicat SQL、Word 练习题或主动截图…");
     private AppSettings _settings = new();
     private AssistantRuntimeStatus _runtimeStatus = new();
+    private bool _privacyMode;
 
     public bool IsRunning => _listener is not null;
+
+    /// <summary>手机页隐私黑屏开关：开启后页面只显示纯黑屏，不泄露任何建议内容。</summary>
+    public bool PrivacyMode
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                return _privacyMode;
+            }
+        }
+        set
+        {
+            lock (_stateLock)
+            {
+                _privacyMode = value;
+            }
+        }
+    }
 
     public int Port { get; private set; }
 
@@ -253,7 +276,7 @@ internal sealed class MobileServerService : IAsyncDisposable
 
                 if (method == "GET" && uri.AbsolutePath == "/")
                 {
-                    await WriteResponseAsync(stream, 200, "text/html; charset=utf-8", BuildPage(), cancellationToken);
+                    await WriteResponseAsync(stream, 200, "text/html; charset=utf-8", BuildPage(token!), cancellationToken);
                     return;
                 }
 
@@ -266,6 +289,7 @@ internal sealed class MobileServerService : IAsyncDisposable
                         {
                             suggestion = _suggestion,
                             runtime = _runtimeStatus,
+                            privacyMode = _privacyMode,
                             settings = new
                             {
                                 _settings.TaskbarPanelEnabled,
@@ -282,6 +306,7 @@ internal sealed class MobileServerService : IAsyncDisposable
                                 _settings.AnswerClipboardQuestionHotkey,
                                 _settings.GuidedTypingHotkey,
                                 _settings.ToggleMobileHotkey,
+                                _settings.ToggleMobilePrivacyHotkey,
                                 _settings.VisionScreenshotHotkey,
                                 taskbarStyle = _settings.TaskbarStyle,
                                 mobileStyle = _settings.MobileStyle
@@ -290,6 +315,40 @@ internal sealed class MobileServerService : IAsyncDisposable
                     }
 
                     await WriteResponseAsync(stream, 200, "application/json; charset=utf-8", json, cancellationToken);
+                    return;
+                }
+
+                if (method == "GET" && uri.AbsolutePath == "/manifest.webmanifest")
+                {
+                    await WriteResponseAsync(
+                        stream,
+                        200,
+                        "application/manifest+json; charset=utf-8",
+                        BuildManifestJson(token!),
+                        cancellationToken);
+                    return;
+                }
+
+                if (method == "GET" && uri.AbsolutePath is "/icon-192.png" or "/icon-512.png" or "/apple-touch-icon.png")
+                {
+                    var iconBytes = uri.AbsolutePath switch
+                    {
+                        "/icon-192.png" => Icon192Png.Value,
+                        "/apple-touch-icon.png" => Icon180Png.Value,
+                        _ => Icon512Png.Value
+                    };
+                    await WriteRawResponseAsync(stream, 200, "image/png", iconBytes, cancellationToken);
+                    return;
+                }
+
+                if (method == "GET" && uri.AbsolutePath == "/sw.js")
+                {
+                    await WriteResponseAsync(
+                        stream,
+                        200,
+                        "application/javascript; charset=utf-8",
+                        BuildServiceWorkerScript(),
+                        cancellationToken);
                     return;
                 }
 
@@ -347,6 +406,9 @@ internal sealed class MobileServerService : IAsyncDisposable
                 string.IsNullOrWhiteSpace(patch.ToggleMobileHotkey)
                     ? _settings.ToggleMobileHotkey
                     : patch.ToggleMobileHotkey,
+                string.IsNullOrWhiteSpace(patch.ToggleMobilePrivacyHotkey)
+                    ? _settings.ToggleMobilePrivacyHotkey
+                    : patch.ToggleMobilePrivacyHotkey,
                 _settings.CycleCandidatesHotkey,
                 "Win+PageUp",
                 "Win+PageDown"
@@ -385,9 +447,16 @@ internal sealed class MobileServerService : IAsyncDisposable
         int statusCode,
         string contentType,
         string content,
+        CancellationToken cancellationToken) =>
+        await WriteRawResponseAsync(stream, statusCode, contentType, Encoding.UTF8.GetBytes(content), cancellationToken);
+
+    private static async Task WriteRawResponseAsync(
+        NetworkStream stream,
+        int statusCode,
+        string contentType,
+        byte[] body,
         CancellationToken cancellationToken)
     {
-        var body = Encoding.UTF8.GetBytes(content);
         var reason = statusCode switch
         {
             200 => "OK",
@@ -440,23 +509,98 @@ internal sealed class MobileServerService : IAsyncDisposable
 
     public async ValueTask DisposeAsync() => await StopAsync();
 
-    private static string BuildPage() => """
+    internal static string BuildManifestJson(string token)
+    {
+        var encodedToken = WebUtility.UrlEncode(token);
+        return JsonSerializer.Serialize(new
+        {
+            name = "Assistant",
+            short_name = "Assistant",
+            description = "Navicat SQL / Word 练习题的手机端辅助页面",
+            start_url = $"/?token={encodedToken}",
+            scope = "/",
+            display = "standalone",
+            background_color = "#0C1117",
+            theme_color = "#151D27",
+            icons = new[]
+            {
+                new { src = $"/icon-192.png?token={encodedToken}", sizes = "192x192", type = "image/png" },
+                new { src = $"/icon-512.png?token={encodedToken}", sizes = "512x512", type = "image/png" }
+            }
+        }, WebJsonOptions);
+    }
+
+    internal static byte[] RenderAppIconPng(int size)
+    {
+        using var bitmap = new Bitmap(size, size);
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        graphics.Clear(Color.Transparent);
+        using var backgroundPath = RoundedRectanglePath(size);
+        using var background = new SolidBrush(Color.FromArgb(23, 32, 42));
+        graphics.FillPath(background, backgroundPath);
+        using var font = new Font("Segoe UI", Math.Max(12, size * 0.52f), FontStyle.Bold, GraphicsUnit.Pixel);
+        using var brush = new SolidBrush(Color.FromArgb(125, 242, 177));
+        using var format = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center
+        };
+        graphics.DrawString("A", font, brush, new RectangleF(0, 0, size, size), format);
+        using var stream = new MemoryStream();
+        bitmap.Save(stream, ImageFormat.Png);
+        return stream.ToArray();
+    }
+
+    private static readonly Lazy<byte[]> Icon192Png = new(() => RenderAppIconPng(192));
+    private static readonly Lazy<byte[]> Icon180Png = new(() => RenderAppIconPng(180));
+    private static readonly Lazy<byte[]> Icon512Png = new(() => RenderAppIconPng(512));
+
+    private static GraphicsPath RoundedRectanglePath(int size)
+    {
+        var radius = size * 0.22f;
+        var diameter = radius * 2;
+        var path = new GraphicsPath();
+        path.AddArc(0, 0, diameter, diameter, 180, 90);
+        path.AddArc(size - diameter, 0, diameter, diameter, 270, 90);
+        path.AddArc(size - diameter, size - diameter, diameter, diameter, 0, 90);
+        path.AddArc(0, size - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    internal static string BuildServiceWorkerScript() => """
+        self.addEventListener('install', () => self.skipWaiting());
+        self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+        self.addEventListener('fetch', (event) => event.respondWith(fetch(event.request)));
+        """;
+
+    private static string BuildPage(string token) => """
         <!doctype html>
         <html lang="zh-CN">
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+          <meta name="theme-color" content="#151D27">
+          <meta name="mobile-web-app-capable" content="yes">
+          <meta name="apple-mobile-web-app-capable" content="yes">
+          <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+          <meta name="apple-mobile-web-app-title" content="Assistant">
+          <link rel="manifest" href="/manifest.webmanifest?token=__ASSISTANT_TOKEN__">
+          <link rel="icon" type="image/png" href="/icon-192.png?token=__ASSISTANT_TOKEN__">
+          <link rel="apple-touch-icon" href="/apple-touch-icon.png?token=__ASSISTANT_TOKEN__">
           <title>Assistant</title>
           <style>
             :root{color-scheme:dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#0c1117;color:#f2f5f7}
             body{margin:0;padding:18px;max-width:920px;margin:auto}.card{background:#151d27;border:1px solid #293746;border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 8px 28px #0005}
             .badge{display:inline-block;padding:3px 9px;border-radius:99px;background:#1e6f50;color:#c9ffe8;font-size:12px}.lights{display:inline-flex;gap:4px;margin-left:8px}.light{width:7px;height:7px;border-radius:50%;background:#7f8c8d}.light.off{background:#7f8c8d}.light.standby{background:#3498db}.light.working{background:#f39c12}.light.ready{background:#27ae60}.light.error{background:#c0392b}h1{font-size:21px;margin:4px 0 16px}h2{font-size:15px;color:#9fb1c3;margin:0 0 9px}
-            #display{font:600 18px/1.55 ui-monospace,Consolas,monospace;color:#7df2b1;white-space:pre-wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0d131a;padding:12px;border-radius:9px;color:#dce7ef}
+            #display{font:600 18px/1.55 ui-monospace,Consolas,monospace;color:#7df2b1;white-space:pre-wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0d131a;padding:12px;border-radius:9px;color:#dce7ef}#privacyOverlay{position:fixed;inset:0;background:#000;z-index:99999}
             #explanation,#issues{line-height:1.65;color:#c7d2dc}#candidates{padding-left:22px;line-height:1.5}#candidates li{padding:7px 9px;margin:6px 0;border-left:3px solid #405365;background:#0d131a;border-radius:5px;font-family:ui-monospace,Consolas,monospace}#candidates li.active{border-color:#58d68d;color:#9af5c2}.grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}.field{display:flex;flex-direction:column;gap:5px}label{font-size:13px;color:#aab8c5}input{background:#0d131a;color:#fff;border:1px solid #3a4d60;border-radius:7px;padding:9px}button{background:#2b8a62;color:white;border:0;border-radius:8px;padding:11px 15px;font-weight:650}.muted{color:#7f91a3;font-size:12px}
             @media(max-width:600px){.grid{grid-template-columns:1fr}body{padding:11px}.card{padding:13px}}
           </style>
         </head>
         <body>
+          <div id="privacyOverlay" hidden></div>
           <h1>Assistant <span id="mode" class="badge">等待</span><span class="lights"><span id="mainLight" class="light standby"></span><span id="databaseLight" class="light off"></span><span id="typingLight" class="light off"></span></span></h1>
           <section class="card"><h2>当前最有用的建议</h2><div id="display">等待 Assistant…</div></section>
           <section id="exerciseCard" class="card" hidden><h2 id="questionTitle">完整题目</h2><pre id="question">—</pre><h2>完整参考答案</h2><pre id="fullAnswer">—</pre></section>
@@ -473,6 +617,7 @@ internal sealed class MobileServerService : IAsyncDisposable
               <div class="field"><label>屏幕 OCR 快捷键</label><input id="visionScreenshotHotkey" type="text" placeholder="Ctrl+Alt+O"></div>
               <div class="field"><label>受控逐字代打快捷键</label><input id="guidedTypingHotkey" type="text" placeholder="Ctrl+Alt+D"></div>
               <div class="field"><label>手机答案开关快捷键</label><input id="toggleMobileHotkey" type="text" placeholder="Ctrl+Alt+M"></div>
+              <div class="field"><label>手机页隐私黑屏快捷键</label><input id="toggleMobilePrivacyHotkey" type="text" placeholder="Ctrl+Alt+P"></div>
               <div class="field"><label>视觉 API 地址</label><input id="visionApiBaseUrl" type="text"></div>
               <div class="field"><label>视觉模型</label><input id="visionModel" type="text"></div>
               <div class="field"><label>GLM 冗余 API 地址</label><input id="fallbackApiBaseUrl" type="text"></div>
@@ -495,7 +640,7 @@ internal sealed class MobileServerService : IAsyncDisposable
             async function refresh(){try{const r=await fetch(api('/api/state'));if(!r.ok)throw Error(r.status);const x=await r.json(),s=x.suggestion||{},c=x.settings||{},rt=x.runtime||{};
               const cs=s.candidates||[],active=s.activeCandidateIndex||0,modes=['补全','诊断','状态','错误','题目回答','题目续写'],types={sql:'SQL题',choice:'选择题',fill_blank:'填空题',short_answer:'简答题',unknown:'题目'},exercise=s.mode===4||s.mode===5;
               let mode=cs.length?`候选 ${active+1}/${cs.length}`:(modes[s.mode]||'建议');if(s.questionType)mode+=` · ${types[s.questionType]||s.questionType}`;if(exercise&&s.questionNumber)mode+=s.questionNumber==='当前题'?' · 当前题':` · 第 ${s.questionNumber} 题`;if(exercise&&s.activeSubquestionNumber)mode+=` · 子问 ${s.activeSubquestionNumber}`;$('mode').textContent=mode;$('display').textContent=s.displayText||'当前没有足够可靠的建议';$('insert').textContent=s.insertText||'—';$('insertTitle').textContent=s.mode===4?'本次答案文本':s.mode===5?'当前光标续写':'完整建议代码';$('explanation').textContent=s.explanation||'—';
-              const light=(id,level,title)=>{const e=$(id);e.className='light '+(level||'off');e.title=title||''};light('mainLight',rt.mainLevel,rt.mainText);light('databaseLight',rt.databaseLevel,rt.databaseText);light('typingLight',rt.guidedTypingLevel,rt.guidedTypingText);
+              const light=(id,level,title)=>{const e=$(id);e.className='light '+(level||'off');e.title=title||''};light('mainLight',rt.mainLevel,rt.mainText);light('databaseLight',rt.databaseLevel,rt.databaseText);light('typingLight',rt.guidedTypingLevel,rt.guidedTypingText);$('privacyOverlay').hidden=!x.privacyMode;
               $('exerciseCard').hidden=!exercise;$('questionTitle').textContent=exercise?(s.questionNumber&&s.questionNumber!=='当前题'?`第 ${s.questionNumber} 题 · 完整题目`:'当前完整题目'):'完整题目';$('question').textContent=s.questionText||'—';$('fullAnswer').textContent=s.fullAnswer||'—';
               $('candidateBlock').hidden=!cs.length;$('candidates').replaceChildren(...cs.map((c,i)=>{const li=document.createElement('li');li.textContent=`${i+1}. ${c.displayText||c.insertText||'—'}`;if(i===active)li.className='active';return li}));
               $('issues').replaceChildren(...(s.issues||[]).map(i=>{const li=document.createElement('li');li.textContent=i;return li}));
@@ -510,17 +655,18 @@ internal sealed class MobileServerService : IAsyncDisposable
                 $('answerClipboardQuestionHotkey').value=c.answerClipboardQuestionHotkey||'Ctrl+Alt+V';
                 $('visionScreenshotHotkey').value=c.visionScreenshotHotkey||'Ctrl+Alt+O';
                 $('guidedTypingHotkey').value=c.guidedTypingHotkey||'Ctrl+Alt+D';
-                $('toggleMobileHotkey').value=c.toggleMobileHotkey||'Ctrl+Alt+M';
+                $('toggleMobileHotkey').value=c.toggleMobileHotkey||'Ctrl+Alt+M';$('toggleMobilePrivacyHotkey').value=c.toggleMobilePrivacyHotkey||'Ctrl+Alt+P';
                 $('visionApiBaseUrl').value=c.visionApiBaseUrl||'https://open.bigmodel.cn/api/paas/v4';$('visionModel').value=c.visionModel||'glm-4.6v';$('fallbackApiBaseUrl').value=c.fallbackApiBaseUrl||'https://open.bigmodel.cn/api/paas/v4';$('fallbackModel').value=c.fallbackModel||'glm-5.2';
                 $('taskbarFont').value=t.fontSize||14;$('taskbarLine').value=t.lineHeight||21;$('taskbarBg').value=t.backgroundColor||'#17202a';$('taskbarFg').value=t.fontColor||'#f8f9f9';$('taskbarOpacity').value=t.backgroundOpacity||.92;
                 $('mobileFont').value=m.fontSize||18;$('mobileLine').value=m.lineHeight||28;$('mobileBg').value=m.backgroundColor||'#151d27';$('mobileFg').value=m.fontColor||'#7df2b1';$('mobileOpacity').value=m.backgroundOpacity||.96;}}
               catch(e){$('display').textContent='无法连接电脑端：'+e.message}}
-            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,visionEnabled:$('visionEnabled').checked,visionApiBaseUrl:$('visionApiBaseUrl').value.trim(),visionModel:$('visionModel').value.trim(),fallbackEnabled:$('fallbackEnabled').checked,fallbackApiBaseUrl:$('fallbackApiBaseUrl').value.trim(),fallbackModel:$('fallbackModel').value.trim(),taskbarWidth:+$('taskbarWidth').value,smartActionHotkey:$('smartActionHotkey').value.trim(),copyFullAnswerHotkey:$('copyFullAnswerHotkey').value.trim(),answerClipboardQuestionHotkey:$('answerClipboardQuestionHotkey').value.trim(),visionScreenshotHotkey:$('visionScreenshotHotkey').value.trim(),guidedTypingHotkey:$('guidedTypingHotkey').value.trim(),toggleMobileHotkey:$('toggleMobileHotkey').value.trim(),taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
+            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,visionEnabled:$('visionEnabled').checked,visionApiBaseUrl:$('visionApiBaseUrl').value.trim(),visionModel:$('visionModel').value.trim(),fallbackEnabled:$('fallbackEnabled').checked,fallbackApiBaseUrl:$('fallbackApiBaseUrl').value.trim(),fallbackModel:$('fallbackModel').value.trim(),taskbarWidth:+$('taskbarWidth').value,smartActionHotkey:$('smartActionHotkey').value.trim(),copyFullAnswerHotkey:$('copyFullAnswerHotkey').value.trim(),answerClipboardQuestionHotkey:$('answerClipboardQuestionHotkey').value.trim(),visionScreenshotHotkey:$('visionScreenshotHotkey').value.trim(),guidedTypingHotkey:$('guidedTypingHotkey').value.trim(),toggleMobileHotkey:$('toggleMobileHotkey').value.trim(),toggleMobilePrivacyHotkey:$('toggleMobilePrivacyHotkey').value.trim(),taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
               const r=await fetch(api('/api/settings'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('saved').textContent=r.ok?'已保存':'保存失败';setTimeout(()=>$('saved').textContent='',1800)};
             refresh();setInterval(refresh,1200);
+            if('serviceWorker' in navigator){try{navigator.serviceWorker.register('/sw.js?token='+encodeURIComponent(token)).catch(()=>{})}catch(e){}}
           </script>
         </body></html>
-        """;
+        """.Replace("__ASSISTANT_TOKEN__", WebUtility.UrlEncode(token));
 }
 
 internal sealed record MobileSettingsPatch
@@ -538,6 +684,7 @@ internal sealed record MobileSettingsPatch
     public string? AnswerClipboardQuestionHotkey { get; init; }
     public string? GuidedTypingHotkey { get; init; }
     public string? ToggleMobileHotkey { get; init; }
+    public string? ToggleMobilePrivacyHotkey { get; init; }
     public string? VisionScreenshotHotkey { get; init; }
     public double? TaskbarFontSize { get; init; }
     public double? TaskbarLineHeight { get; init; }

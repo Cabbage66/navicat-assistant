@@ -15,6 +15,7 @@ internal enum HotkeyAction
     AnswerClipboardQuestion,
     ToggleGuidedTyping,
     ToggleMobile,
+    ToggleMobilePrivacy,
     CycleCandidates,
     AnalyzeSelection,
     IdentifyWordExercise,

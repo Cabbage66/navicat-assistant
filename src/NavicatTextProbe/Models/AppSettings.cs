@@ -55,6 +55,7 @@ public sealed record AppSettings
     public string AnswerClipboardQuestionHotkey { get; set; } = "Ctrl+Alt+V";
     public string GuidedTypingHotkey { get; set; } = "Ctrl+Alt+D";
     public string ToggleMobileHotkey { get; set; } = "Ctrl+Alt+M";
+    public string ToggleMobilePrivacyHotkey { get; set; } = "Ctrl+Alt+P";
     public string CycleCandidatesHotkey { get; set; } = "Ctrl+Alt+R";
     public string AnalyzeSelectionHotkey { get; set; } = "Ctrl+Alt+E";
     public string WordExerciseHotkey { get; set; } = "Ctrl+Alt+A";

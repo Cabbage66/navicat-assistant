@@ -31,6 +31,8 @@
 - `Ctrl+Alt+S` 是整套 Assistant 的总开关。关闭时停止探测、键盘兜底、DeepSeek/智谱在途请求、截图识题、任务栏提示和手机服务；开启时恢复已配置通道，并立即读取当前 Navicat 或 Word 开始分析。
 - 应用、主窗口、手机页和托盘统一显示为 `Assistant`，使用 Windows 内置应用图标。
 - `Ctrl+Alt+M` 可独立启停手机服务。手机页显示短建议、完整 SQL、Word 完整题目、完整答案、当前续写、解析和问题列表；任务栏宽度、样式与核心快捷键可从手机反向同步。
+- `Ctrl+Alt+P` 一键把手机页切换为纯黑屏（隐私模式），再次按下恢复正常显示；切换只影响手机端展示，电脑端仍可继续补全，建议开会、投屏或离开座位时使用。快捷键可在设置中修改。
+- 手机页是 PWA：带 Manifest、图标和 Service Worker，手机浏览器"添加到主屏幕"后可以像 App 一样全屏打开并带独立图标。手机端走局域网 HTTP，Chrome 的完整安装提示需要 HTTPS，直接用"添加到主屏幕"即可；电脑 `localhost` 访问时支持完整安装。
 - DeepSeek、智谱 API Key 和数据库密码分别存入 Windows 凭据管理器，不进入 `settings.json`、源码或日志。
 
 DeepSeek 上下文和自主工具调用口径来自[官方模型与价格页](https://api-docs.deepseek.com/quick_start/pricing/)及[官方 Tool Calls 指南](https://api-docs.deepseek.com/guides/tool_calls)。
@@ -73,6 +75,7 @@ assistant\dist\Assistant\Assistant.dll
 | 强制当前屏幕 OCR | `Ctrl+Alt+O` |
 | 开启/关闭受控逐字代打 | `Ctrl+Alt+D` |
 | 开启/关闭手机完整答案 | `Ctrl+Alt+M` |
+| 手机页切换纯黑屏（隐私模式） | `Ctrl+Alt+P` |
 | 生成/切换当前光标的 3 个续写候选 | `Ctrl+Alt+R` |
 | 任务栏长内容向上/向下翻页 | `Win+PageUp` / `Win+PageDown` |
 
@@ -87,6 +90,7 @@ assistant\dist\Assistant\Assistant.dll
 - 手机打不开时点击“修复手机访问”，同意 UAC 后只对 `Private,Public` 配置文件的 `LocalSubnet` 放行当前 TCP 端口。
 - 默认端口是 `17832`；错误令牌返回 HTTP 401。
 - 不要把带令牌的完整地址发给不受信任的人。
+- 手机页支持"添加到主屏幕"：Chrome/Edge 菜单里选择"添加到主屏幕"或"安装应用"，iOS Safari 选择"添加到主屏幕"，图标和名称会从 PWA Manifest 读取。首次打开后如提示是否安装，选择允许即可；隐私模式开启时手机页只显示纯黑屏。
 
 ## 键盘兜底边界
 
@@ -157,7 +161,7 @@ dotnet publish "\\wsl.localhost\Ubuntu-24.04\home\t\projects\personal\02learn-sq
   -o "\\wsl.localhost\Ubuntu-24.04\home\t\projects\personal\02learn-sql\assistant\dist\Assistant"
 ```
 
-无第三方测试框架的自检项目覆盖建议匹配、AI 数据库工具自主调用/不调用、目录上下文、只读 SQL 验证、当前题完整答案与剪贴板题目专用提示、剪贴板正文脱敏、独占快捷键、Unicode 代打队列、外键语法状态、三候选、普通 Word 全文光标提示、Word 300/1,000/3,000 题目上下文、顶层大题重建、边界校验、AI JSON/token 映射、DeepSeek 超时切智谱 GLM 冗余（含关闭/无 Key/连接失败/HTTP 错误不切换）、三灯手机页、日志隐私、手机地址、旧配置迁移，以及 80 万字符 SQL 上下文的全文优先和超长裁剪：
+无第三方测试框架的自检项目覆盖建议匹配、AI 数据库工具自主调用/不调用、目录上下文、只读 SQL 验证、当前题完整答案与剪贴板题目专用提示、剪贴板正文脱敏、独占快捷键、Unicode 代打队列、外键语法状态、三候选、普通 Word 全文光标提示、Word 300/1,000/3,000 题目上下文、顶层大题重建、边界校验、AI JSON/token 映射、DeepSeek 超时切智谱 GLM 冗余（含关闭/无 Key/连接失败/HTTP 错误不切换）、手机页隐私黑屏、PWA Manifest/图标/Service Worker、三灯手机页、日志隐私、手机地址、旧配置迁移，以及 80 万字符 SQL 上下文的全文优先和超长裁剪：
 
 ```powershell
 dotnet build "\\wsl.localhost\Ubuntu-24.04\home\t\projects\personal\02learn-sql\assistant\NavicatAssistant.slnx" -c Release

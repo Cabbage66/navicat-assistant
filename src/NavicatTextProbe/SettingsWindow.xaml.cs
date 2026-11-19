@@ -91,6 +91,7 @@ public partial class SettingsWindow : Window
         AnswerClipboardQuestionHotkeyTextBox.Text = _workingCopy.AnswerClipboardQuestionHotkey;
         GuidedTypingHotkeyTextBox.Text = _workingCopy.GuidedTypingHotkey;
         ToggleMobileHotkeyTextBox.Text = _workingCopy.ToggleMobileHotkey;
+        ToggleMobilePrivacyHotkeyTextBox.Text = _workingCopy.ToggleMobilePrivacyHotkey;
         CandidateHotkeyTextBox.Text = _workingCopy.CycleCandidatesHotkey;
         VisionScreenshotHotkeyTextBox.Text = _workingCopy.VisionScreenshotHotkey;
 
@@ -166,6 +167,7 @@ public partial class SettingsWindow : Window
         _workingCopy.AnswerClipboardQuestionHotkey = AnswerClipboardQuestionHotkeyTextBox.Text.Trim();
         _workingCopy.GuidedTypingHotkey = GuidedTypingHotkeyTextBox.Text.Trim();
         _workingCopy.ToggleMobileHotkey = ToggleMobileHotkeyTextBox.Text.Trim();
+        _workingCopy.ToggleMobilePrivacyHotkey = ToggleMobilePrivacyHotkeyTextBox.Text.Trim();
         _workingCopy.CycleCandidatesHotkey = CandidateHotkeyTextBox.Text.Trim();
         _workingCopy.WordExerciseHotkey = _workingCopy.SmartActionHotkey;
         _workingCopy.VisionScreenshotHotkey = VisionScreenshotHotkeyTextBox.Text.Trim();
@@ -179,6 +181,7 @@ public partial class SettingsWindow : Window
             _workingCopy.VisionScreenshotHotkey,
             _workingCopy.GuidedTypingHotkey,
             _workingCopy.ToggleMobileHotkey,
+            _workingCopy.ToggleMobilePrivacyHotkey,
             _workingCopy.CycleCandidatesHotkey,
             "Win+PageUp",
             "Win+PageDown"
